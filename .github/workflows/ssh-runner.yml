@@ -92,17 +92,18 @@ jobs:
           echo "$github_actor"
           echo "github_actor=$github_actor" >> $GITHUB_ENV
 
-      - name: Store Slack infos
-        #because the SSH can be enabled dynamically if the workflow failed, so we need to store slack infos to be able to retrieve them during the waitforssh step
-        shell: bash
-        run: |
-          echo "${{ env.github_actor }}"
-          if [ "${{ secrets[format('{0}_{1}', env.github_actor, 'SLACK_ID')] }}" != "" ]; then
-            echo "SLACKCHANNEL=${{ secrets[format('{0}_{1}', env.github_actor, 'SLACK_ID')] }}" >> $GITHUB_ENV
-          else
-            echo "SLACKCHANNEL=${{ secrets.SLACK_CIFEEDBACK_CHANNEL }}" >> $GITHUB_ENV
-          fi
+      # Set SLACKCHANNEL for known actors explicitly, fall back to default
+      - name: Set Slack channel for alice
+        if: env.github_actor == 'alice'
+        run: echo "SLACKCHANNEL=${{ secrets.ALICE_SLACK_ID }}" >> $GITHUB_ENV
 
+      - name: Set Slack channel for bob
+        if: env.github_actor == 'bob'
+        run: echo "SLACKCHANNEL=${{ secrets.BOB_SLACK_ID }}" >> $GITHUB_ENV
+
+      - name: Set default Slack channel
+        if: ${{ ! (env.github_actor == 'alice' || env.github_actor == 'bob') }}
+        run: echo "SLACKCHANNEL=${{ secrets.SLACK_CIFEEDBACK_CHANNEL }}" >> $GITHUB_ENV
       - name: Tailscale # In order to be able to SSH when a test fails
         uses: huggingface/tailscale-action@main
         with:
