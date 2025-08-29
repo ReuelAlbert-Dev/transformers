@@ -54,13 +54,13 @@ jobs:
       - name: Prepare some setup values
         run: |
           if [ -f setup_values/prev_workflow_run_id.txt ]; then
-            echo "PREV_WORKFLOW_RUN_ID=$(cat setup_values/prev_workflow_run_id.txt)" >> $GITHUB_ENV
+            echo "PREV_WORKFLOW_RUN_ID=$(cat setup_values/prev_workflow_run_id.txt | tr -d '\n\r')" >> $GITHUB_ENV
           else
             echo "PREV_WORKFLOW_RUN_ID=" >> $GITHUB_ENV
           fi
 
           if [ -f setup_values/other_workflow_run_id.txt ]; then
-            echo "OTHER_WORKFLOW_RUN_ID=$(cat setup_values/other_workflow_run_id.txt)" >> $GITHUB_ENV
+            echo "OTHER_WORKFLOW_RUN_ID=$(cat setup_values/other_workflow_run_id.txt | tr -d '\n\r')" >> $GITHUB_ENV
           else
             echo "OTHER_WORKFLOW_RUN_ID=" >> $GITHUB_ENV
           fi
