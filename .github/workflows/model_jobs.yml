@@ -1,4 +1,6 @@
 name: model jobs
+permissions:
+  contents: read
 
 on:
   workflow_call:
