@@ -10,6 +10,8 @@ jobs:
   build_and_test:
     name: build release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
