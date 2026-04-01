@@ -48,7 +48,7 @@ if is_torch_available():
 if is_vision_available():
     from PIL import Image
 
-    from transformers import ViTImageProcessor
+    from transformers import ViTImageProcessorPil
 
 
 class ViTMAEModelTester:
@@ -180,11 +180,10 @@ class ViTMAEModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
     pipeline_model_mapping = {"image-feature-extraction": ViTMAEModel} if is_torch_available() else {}
 
     test_resize_embeddings = False
-    test_torch_exportable = True
 
     def setUp(self):
         self.model_tester = ViTMAEModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=ViTMAEConfig, has_text_modality=False, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=ViTMAEConfig, has_text_modality=False, hidden_size=32)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -330,7 +329,7 @@ def prepare_img():
 class ViTMAEModelIntegrationTest(unittest.TestCase):
     @cached_property
     def default_image_processor(self):
-        return ViTImageProcessor.from_pretrained("facebook/vit-mae-base")
+        return ViTImageProcessorPil.from_pretrained("facebook/vit-mae-base")
 
     @cached_property
     def default_model(self):

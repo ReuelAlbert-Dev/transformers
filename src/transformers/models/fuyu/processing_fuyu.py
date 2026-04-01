@@ -16,7 +16,7 @@ Image/Text processor class for GIT
 """
 
 import re
-from typing import Optional, Union
+from typing import Union
 
 import numpy as np
 
@@ -235,7 +235,7 @@ def _transform_within_tags(text: str, scale_factor: float, tokenizer) -> list[in
 def _tokenize_prompts_with_image_and_batch(
     tokenizer,
     prompts: list[list[str]],
-    scale_factors: Optional[list[list["torch.Tensor"]]],
+    scale_factors: list[list["torch.Tensor"]] | None,
     max_tokens_to_generate: int,
     max_position_embeddings: int,
     add_BOS: bool,  # Same issue with types as above
@@ -360,6 +360,7 @@ class FuyuProcessor(ProcessorMixin):
         self.dummy_image_index = -1
         self.image_token_id = tokenizer.encode("|SPEAKER|", add_special_tokens=False)[1]
         self.image_newline_id = tokenizer.encode("|NEWLINE|", add_special_tokens=False)[1]
+        self.image_ids = [self.image_newline_id, self.image_token_id]
 
     def _left_pad_inputs_with_attention_mask(self, model_inputs: list[dict], return_attention_mask: bool):
         max_length_input_ids = max(entry["input_ids"].shape[1] for entry in model_inputs)
@@ -484,8 +485,8 @@ class FuyuProcessor(ProcessorMixin):
     @auto_docstring
     def __call__(
         self,
-        images: Optional[ImageInput] = None,
-        text: Optional[Union[str, list[str], TextInput, PreTokenizedInput]] = None,
+        images: ImageInput | None = None,
+        text: str | list[str] | TextInput | PreTokenizedInput | None = None,
         **kwargs: Unpack[FuyuProcessorKwargs],
     ) -> "FuyuBatchFeature":
         r"""
@@ -565,12 +566,8 @@ class FuyuProcessor(ProcessorMixin):
             model_inputs=all_encodings, return_attention_mask=True
         )
         if return_mm_token_type_ids:
-            input_ids = batch_encoding["input_ids"]
-            mm_token_type_ids = torch.zeros_like(input_ids)
-            mm_token_type_ids[input_ids == self.image_token_id] = 1
-            mm_token_type_ids[input_ids == self.image_newline_id] = 1
-            batch_encoding["mm_token_type_ids"] = mm_token_type_ids
-
+            batch_encoding["mm_token_type_ids"] = self.create_mm_token_type_ids(batch_encoding["input_ids"])
+            batch_encoding["mm_token_type_ids"] = torch.tensor(batch_encoding["mm_token_type_ids"])
         return FuyuBatchFeature(data=batch_encoding)
 
     def _get_num_multimodal_tokens(self, image_sizes=None, **kwargs):

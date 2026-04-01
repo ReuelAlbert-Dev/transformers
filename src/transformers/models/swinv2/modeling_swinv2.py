@@ -15,7 +15,6 @@
 
 import collections.abc
 import math
-import warnings
 from dataclasses import dataclass
 
 import torch
@@ -23,12 +22,12 @@ from torch import Tensor, nn
 
 from ... import initialization as init
 from ...activations import ACT2FN
+from ...backbone_utils import BackboneMixin, filter_output_hidden_states
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BackboneOutput
 from ...modeling_utils import PreTrainedModel
-from ...pytorch_utils import meshgrid
 from ...utils import ModelOutput, auto_docstring, logging, torch_int
-from ...utils.backbone_utils import BackboneMixin
+from ...utils.generic import can_return_tuple
 from .configuration_swinv2 import Swinv2Config
 
 
@@ -113,15 +112,6 @@ class Swinv2MaskedImageModelingOutput(ModelOutput):
     hidden_states: tuple[torch.FloatTensor, ...] | None = None
     attentions: tuple[torch.FloatTensor, ...] | None = None
     reshaped_hidden_states: tuple[torch.FloatTensor, ...] | None = None
-
-    @property
-    def logits(self):
-        warnings.warn(
-            "logits attribute is deprecated and will be removed in version 5 of Transformers."
-            " Please use the reconstruction attribute to retrieve the final output instead.",
-            FutureWarning,
-        )
-        return self.reconstruction
 
 
 @dataclass
@@ -501,7 +491,7 @@ class Swinv2SelfAttention(nn.Module):
         relative_coords_h = torch.arange(-(self.window_size[0] - 1), self.window_size[0], dtype=torch.int64).float()
         relative_coords_w = torch.arange(-(self.window_size[1] - 1), self.window_size[1], dtype=torch.int64).float()
         relative_coords_table = (
-            torch.stack(meshgrid([relative_coords_h, relative_coords_w], indexing="ij"))
+            torch.stack(torch.meshgrid([relative_coords_h, relative_coords_w], indexing="ij"))
             .permute(1, 2, 0)
             .contiguous()
             .unsqueeze(0)
@@ -522,7 +512,7 @@ class Swinv2SelfAttention(nn.Module):
         # get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(self.window_size[0])
         coords_w = torch.arange(self.window_size[1])
-        coords = torch.stack(meshgrid([coords_h, coords_w], indexing="ij"))
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
         coords_flatten = torch.flatten(coords, 1)
         relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
         relative_coords = relative_coords.permute(1, 2, 0).contiguous()
@@ -958,7 +948,7 @@ class Swinv2Model(Swinv2PreTrainedModel):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if pixel_values is None:
             raise ValueError("You have to specify pixel_values")
@@ -1048,10 +1038,12 @@ class Swinv2ForMaskedImageModeling(Swinv2PreTrainedModel):
         >>> from transformers import AutoImageProcessor, Swinv2ForMaskedImageModeling
         >>> import torch
         >>> from PIL import Image
-        >>> import requests
+        >>> import httpx
+        >>> from io import BytesIO
 
         >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
+        >>> with httpx.stream("GET", url) as response:
+        ...     image = Image.open(BytesIO(response.read()))
 
         >>> image_processor = AutoImageProcessor.from_pretrained("microsoft/swinv2-tiny-patch4-window8-256")
         >>> model = Swinv2ForMaskedImageModeling.from_pretrained("microsoft/swinv2-tiny-patch4-window8-256")
@@ -1066,7 +1058,7 @@ class Swinv2ForMaskedImageModeling(Swinv2PreTrainedModel):
         >>> list(reconstructed_pixel_values.shape)
         [1, 3, 256, 256]
         ```"""
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.swinv2(
             pixel_values,
@@ -1160,7 +1152,7 @@ class Swinv2ForImageClassification(Swinv2PreTrainedModel):
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
             `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         outputs = self.swinv2(
             pixel_values,
@@ -1196,10 +1188,9 @@ class Swinv2ForImageClassification(Swinv2PreTrainedModel):
     Swinv2 backbone, to be used with frameworks like DETR and MaskFormer.
     """
 )
-class Swinv2Backbone(Swinv2PreTrainedModel, BackboneMixin):
+class Swinv2Backbone(BackboneMixin, Swinv2PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
-        super()._init_backbone(config)
 
         self.num_features = [config.embed_dim] + [int(config.embed_dim * 2**i) for i in range(len(config.depths))]
         self.embeddings = Swinv2Embeddings(config)
@@ -1211,6 +1202,8 @@ class Swinv2Backbone(Swinv2PreTrainedModel, BackboneMixin):
     def get_input_embeddings(self):
         return self.embeddings.patch_embeddings
 
+    @can_return_tuple
+    @filter_output_hidden_states
     @auto_docstring
     def forward(
         self,
@@ -1227,10 +1220,12 @@ class Swinv2Backbone(Swinv2PreTrainedModel, BackboneMixin):
         >>> from transformers import AutoImageProcessor, AutoBackbone
         >>> import torch
         >>> from PIL import Image
-        >>> import requests
+        >>> import httpx
+        >>> from io import BytesIO
 
         >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
+        >>> with httpx.stream("GET", url) as response:
+        ...     image = Image.open(BytesIO(response.read()))
 
         >>> processor = AutoImageProcessor.from_pretrained("microsoft/swinv2-tiny-patch4-window8-256")
         >>> model = AutoBackbone.from_pretrained(
@@ -1244,7 +1239,7 @@ class Swinv2Backbone(Swinv2PreTrainedModel, BackboneMixin):
         >>> list(feature_maps[-1].shape)
         [1, 2048, 7, 7]
         ```"""
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )

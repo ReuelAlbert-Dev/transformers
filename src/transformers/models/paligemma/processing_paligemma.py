@@ -15,8 +15,6 @@
 Processor class for PaliGemma.
 """
 
-from typing import Optional, Union
-
 import numpy as np
 
 from ...feature_extraction_utils import BatchFeature
@@ -45,7 +43,7 @@ class PaliGemmaTextKwargs(TextKwargs):
         for more information. If your prompt is "<image> What is on the image", the suffix corresponds to the expected prediction "a cow sitting on a bench".
     """
 
-    suffix: Optional[Union[TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]]]
+    suffix: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] | None
 
 
 class PaliGemmaProcessorKwargs(ProcessingKwargs, total=False):
@@ -130,8 +128,8 @@ class PaliGemmaProcessor(ProcessorMixin):
     @auto_docstring
     def __call__(
         self,
-        images: Optional[ImageInput] = None,
-        text: Union[TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]] = None,
+        images: ImageInput | None = None,
+        text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] = None,
         **kwargs: Unpack[PaliGemmaProcessorKwargs],
     ) -> BatchFeature:
         r"""
@@ -243,11 +241,7 @@ class PaliGemmaProcessor(ProcessorMixin):
             return_data.update({"labels": labels})
 
         if return_mm_token_type_ids:
-            array_ids = np.array(return_data["input_ids"])
-            mm_token_type_ids = np.zeros_like(return_data["input_ids"])
-            mm_token_type_ids[array_ids == self.image_token_id] = 1
-            return_data["mm_token_type_ids"] = mm_token_type_ids.tolist()
-
+            return_data["mm_token_type_ids"] = self.create_mm_token_type_ids(return_data["input_ids"])
         return BatchFeature(data=return_data, tensor_type=return_tensors)
 
     def _get_num_multimodal_tokens(self, image_sizes=None, **kwargs):

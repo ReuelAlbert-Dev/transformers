@@ -10,15 +10,14 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
-from transformers.utils import add_start_docstrings
-
 from ...activations import ACT2FN
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, torch_int
-from ...utils.generic import check_model_inputs
+from ...utils.generic import merge_with_config_defaults
+from ...utils.output_capturing import capture_outputs
 from .configuration_multimodal2 import Multimodal2Config, Multimodal2TextConfig, Multimodal2VisionConfig
 
 
@@ -52,11 +51,6 @@ class Multimodal2VisionAttention(nn.Module):
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
-        if self.head_dim * self.num_heads != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
-            )
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
         self.is_causal = False
@@ -84,9 +78,9 @@ class Multimodal2VisionAttention(nn.Module):
         keys = keys.view(batch_size, seq_length, -1, self.head_dim).transpose(1, 2)
         values = values.view(batch_size, seq_length, -1, self.head_dim).transpose(1, 2)
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -201,6 +195,28 @@ class Multimodal2VisionEncoder(nn.Module):
         )
 
 
+@auto_docstring
+class Multimodal2VisionPreTrainedModel(PreTrainedModel):
+    config: Multimodal2Config
+    base_model_prefix = "multimodal2_vision"
+    input_modalities = ("image", "text")
+    supports_gradient_checkpointing = True
+    _supports_sdpa = True
+    _supports_flash_attn = True
+    _supports_flex_attn = True
+    _supports_attention_backend = True
+    _can_record_outputs = {
+        "hidden_states": Multimodal2VisionEncoderLayer,
+        "attentions": Multimodal2VisionAttention,
+    }
+
+    @torch.no_grad()
+    def _init_weights(self, module):
+        """Initialize the weights"""
+        if isinstance(module, Multimodal2VisionMLP):
+            pass
+
+
 class Multimodal2VisionEmbeddings(nn.Module):
     def __init__(self, config: Multimodal2VisionConfig):
         super().__init__()
@@ -284,9 +300,14 @@ class Multimodal2VisionEmbeddings(nn.Module):
         return embeddings
 
 
-class Multimodal2VisionTransformer(nn.Module):
+class Multimodal2VisionTransformer(Multimodal2VisionPreTrainedModel):
+    config: Multimodal2VisionConfig
+    main_input_name = "pixel_values"
+    input_modalities = ("image",)
+    _no_split_modules = ["CLIPEncoderLayer"]
+
     def __init__(self, config):
-        super().__init__()
+        super().__init__(config)
         self.config = config
         embed_dim = config.hidden_size
 
@@ -294,7 +315,10 @@ class Multimodal2VisionTransformer(nn.Module):
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.encoder = Multimodal2VisionEncoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
+        self.post_init()
 
+    @merge_with_config_defaults
+    @capture_outputs(tie_last_hidden_states=False)
     @auto_docstring
     def forward(
         self,
@@ -323,32 +347,11 @@ class Multimodal2VisionTransformer(nn.Module):
         )
 
 
-@auto_docstring
-class Multimodal2VisionPreTrainedModel(PreTrainedModel):
-    config: Multimodal2Config
-    base_model_prefix = "multimodal2_vision"
-    input_modalities = ("image", "text")
-    supports_gradient_checkpointing = True
-    _supports_sdpa = True
-    _supports_flash_attn = True
-    _supports_flex_attn = True
-    _supports_attention_backend = True
-    _can_record_outputs = {
-        "hidden_states": Multimodal2VisionEncoderLayer,
-        "attentions": Multimodal2VisionAttention,
-    }
-
-    @torch.no_grad()
-    def _init_weights(self, module):
-        """Initialize the weights"""
-        if isinstance(module, Multimodal2VisionMLP):
-            pass
-
-
-MULTIMODAL2_VISION_START_DOCSTRING = "doc"
-
-
-@add_start_docstrings("New doc", MULTIMODAL2_VISION_START_DOCSTRING)
+@auto_docstring(
+    custom_intro="""
+    The vision model from MULTIMODAL2 without any head or projection on top.
+    """
+)
 class Multimodal2VisionModel(Multimodal2VisionPreTrainedModel):
     config: Multimodal2VisionConfig
     main_input_name = "pixel_values"
@@ -364,7 +367,6 @@ class Multimodal2VisionModel(Multimodal2VisionPreTrainedModel):
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
 
-    @check_model_inputs(tie_last_hidden_states=False)
     @auto_docstring
     def forward(
         self,
@@ -377,14 +379,16 @@ class Multimodal2VisionModel(Multimodal2VisionPreTrainedModel):
 
         ```python
         >>> from PIL import Image
-        >>> import requests
+        >>> import httpx
+        >>> from io import BytesIO
         >>> from transformers import AutoProcessor, Multimodal2VisionModel
 
         >>> model = Multimodal2VisionModel.from_pretrained("openai/multimodal2-vit-base-patch32")
         >>> processor = AutoProcessor.from_pretrained("openai/multimodal2-vit-base-patch32")
 
         >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
+        >>> with httpx.stream("GET", url) as response:
+        ...     image = Image.open(BytesIO(response.read()))
 
         >>> inputs = processor(images=image, return_tensors="pt")
 

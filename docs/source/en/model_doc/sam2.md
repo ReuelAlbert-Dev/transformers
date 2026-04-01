@@ -333,9 +333,10 @@ SAM2 can use masks from previous predictions as input to refine segmentation:
     - __call__
     - post_process_masks
 
-## Sam2ImageProcessorFast
+## Sam2ImageProcessor
 
-[[autodoc]] Sam2ImageProcessorFast
+[[autodoc]] Sam2ImageProcessor
+    - preprocess
 
 ## Sam2HieraDetModel
 
@@ -351,3 +352,4 @@ SAM2 can use masks from previous predictions as input to refine segmentation:
 
 [[autodoc]] Sam2Model
     - forward
+    - get_image_features

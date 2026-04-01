@@ -145,6 +145,12 @@ print(response)
 ## AriaImageProcessor
 
 [[autodoc]] AriaImageProcessor
+    - preprocess
+
+## AriaImageProcessorPil
+
+[[autodoc]] AriaImageProcessorPil
+    - preprocess
 
 ## AriaProcessor
 
@@ -175,3 +181,4 @@ print(response)
 
 [[autodoc]] AriaForConditionalGeneration
     - forward
+    - get_image_features

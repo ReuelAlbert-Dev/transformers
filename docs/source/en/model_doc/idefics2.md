@@ -208,20 +208,22 @@ A list of official Hugging Face and community (indicated by 🌎) resources to h
 
 [[autodoc]] Idefics2Model
     - forward
+    - get_image_features
 
 ## Idefics2ForConditionalGeneration
 
 [[autodoc]] Idefics2ForConditionalGeneration
     - forward
+    - get_image_features
 
 ## Idefics2ImageProcessor
 
 [[autodoc]] Idefics2ImageProcessor
     - preprocess
 
-## Idefics2ImageProcessorFast
+## Idefics2ImageProcessorPil
 
-[[autodoc]] Idefics2ImageProcessorFast
+[[autodoc]] Idefics2ImageProcessorPil
     - preprocess
 
 ## Idefics2Processor

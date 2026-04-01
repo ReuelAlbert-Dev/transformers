@@ -21,6 +21,8 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from typing import Any, TypeVar
 
+from huggingface_hub import repo_exists
+
 from ...configuration_utils import PreTrainedConfig
 from ...dynamic_module_utils import get_class_from_dynamic_module, resolve_trust_remote_code
 from ...utils import (
@@ -68,7 +70,7 @@ FROM_CONFIG_DOCSTRING = """
 
                 List options
             attn_implementation (`str`, *optional*):
-                The attention implementation to use in the model (if relevant). Can be any of `"eager"` (manual implementation of the attention), `"sdpa"` (using [`F.scaled_dot_product_attention`](https://pytorch.org/docs/master/generated/torch.nn.functional.scaled_dot_product_attention.html)), or `"flash_attention_2"` (using [Dao-AILab/flash-attention](https://github.com/Dao-AILab/flash-attention)). By default, if available, SDPA will be used for torch>=2.1.1. The default is otherwise the manual `"eager"` implementation.
+                The attention implementation to use in the model (if relevant). Can be any of `"eager"` (manual implementation of the attention), `"sdpa"` (using [`F.scaled_dot_product_attention`](https://pytorch.org/docs/master/generated/torch.nn.functional.scaled_dot_product_attention.html)), `"flash_attention_2"` (using [Dao-AILab/flash-attention](https://github.com/Dao-AILab/flash-attention)), or `"flash_attention_3"` (using [Dao-AILab/flash-attention/hopper](https://github.com/Dao-AILab/flash-attention/tree/main/hopper)). By default, if available, SDPA will be used for torch>=2.1.1. The default is otherwise the manual `"eager"` implementation.
 
         Examples:
 
@@ -128,7 +130,7 @@ FROM_PRETRAINED_TORCH_DOCSTRING = """
                 A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
                 'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
             output_loading_info(`bool`, *optional*, defaults to `False`):
-                Whether ot not to also return a dictionary containing missing keys, unexpected keys and error messages.
+                Whether or not to also return a dictionary containing missing keys, unexpected keys and error messages.
             local_files_only(`bool`, *optional*, defaults to `False`):
                 Whether or not to only look at local files (e.g., not try downloading the model).
             revision (`str`, *optional*, defaults to `"main"`):
@@ -206,6 +208,9 @@ class _BaseAutoModelClass:
         trust_remote_code = kwargs.pop("trust_remote_code", None)
         has_remote_code = hasattr(config, "auto_map") and cls.__name__ in config.auto_map
         has_local_code = type(config) in cls._model_mapping
+        explicit_local_code = has_local_code and not _get_model_class(
+            config, cls._model_mapping
+        ).__module__.startswith("transformers.")
         if has_remote_code:
             class_ref = config.auto_map[cls.__name__]
             if "--" in class_ref:
@@ -216,7 +221,7 @@ class _BaseAutoModelClass:
                 trust_remote_code, config._name_or_path, has_local_code, has_remote_code, upstream_repo=upstream_repo
             )
 
-        if has_remote_code and trust_remote_code:
+        if has_remote_code and trust_remote_code and not explicit_local_code:
             if "--" in class_ref:
                 repo_id, class_ref = class_ref.split("--")
             else:
@@ -231,7 +236,7 @@ class _BaseAutoModelClass:
             _ = kwargs.pop("code_revision", None)
             model_class = add_generation_mixin_to_remote_model(model_class)
             return model_class._from_config(config, **kwargs)
-        elif type(config) in cls._model_mapping:
+        elif has_local_code:
             model_class = _get_model_class(config, cls._model_mapping)
             return model_class._from_config(config, **kwargs)
 
@@ -300,7 +305,14 @@ class _BaseAutoModelClass:
                     adapter_config = json.load(f)
 
                     adapter_kwargs["_adapter_model_path"] = pretrained_model_name_or_path
-                    pretrained_model_name_or_path = adapter_config["base_model_name_or_path"]
+                    # Only override the model name/path if the current value doesn't point to a
+                    # complete model with an embedded adapter so that local models with embedded
+                    # adapters will load from the local base model rather than pull the base
+                    # model named in the adapter's config from the hub.
+                    if not os.path.exists(pretrained_model_name_or_path) or not os.path.exists(
+                        os.path.join(pretrained_model_name_or_path, CONFIG_NAME)
+                    ):
+                        pretrained_model_name_or_path = adapter_config["base_model_name_or_path"]
 
         if not isinstance(config, PreTrainedConfig):
             kwargs_orig = copy.deepcopy(kwargs)
@@ -333,6 +345,9 @@ class _BaseAutoModelClass:
 
         has_remote_code = hasattr(config, "auto_map") and cls.__name__ in config.auto_map
         has_local_code = type(config) in cls._model_mapping
+        explicit_local_code = has_local_code and not _get_model_class(
+            config, cls._model_mapping
+        ).__module__.startswith("transformers.")
         upstream_repo = None
         if has_remote_code:
             class_ref = config.auto_map[cls.__name__]
@@ -350,7 +365,7 @@ class _BaseAutoModelClass:
         # Set the adapter kwargs
         kwargs["adapter_kwargs"] = adapter_kwargs
 
-        if has_remote_code and trust_remote_code:
+        if has_remote_code and trust_remote_code and not explicit_local_code:
             model_class = get_class_from_dynamic_module(
                 class_ref, pretrained_model_name_or_path, code_revision=code_revision, **hub_kwargs, **kwargs
             )
@@ -365,7 +380,7 @@ class _BaseAutoModelClass:
             return model_class.from_pretrained(
                 pretrained_model_name_or_path, *model_args, config=config, **hub_kwargs, **kwargs
             )
-        elif type(config) in cls._model_mapping:
+        elif has_local_code:
             model_class = _get_model_class(config, cls._model_mapping)
             if model_class.config_class == config.sub_configs.get("text_config", None):
                 config = config.get_text_config()
@@ -416,21 +431,21 @@ class _BaseAutoBackboneClass(_BaseAutoModelClass):
 
         num_channels = kwargs.pop("num_channels", config.num_channels)
         features_only = kwargs.pop("features_only", config.features_only)
-        use_pretrained_backbone = kwargs.pop("use_pretrained_backbone", config.use_pretrained_backbone)
         out_indices = kwargs.pop("out_indices", config.out_indices)
         config = TimmBackboneConfig(
             backbone=pretrained_model_name_or_path,
             num_channels=num_channels,
             features_only=features_only,
-            use_pretrained_backbone=use_pretrained_backbone,
             out_indices=out_indices,
         )
-        return super().from_config(config, **kwargs)
+        # Always load a pretrained model when `from_pretrained` is called
+        kwargs.pop("use_pretrained_backbone", None)
+        return super().from_config(config, pretrained=True, **kwargs)
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        use_timm_backbone = kwargs.pop("use_timm_backbone", False)
-        if use_timm_backbone:
+        kwargs.pop("use_timm_backbone", None)
+        if not repo_exists(pretrained_model_name_or_path):
             return cls._load_timm_backbone_from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
 
         return super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
@@ -493,6 +508,8 @@ def getattribute_from_module(module, attr):
         return None
     if isinstance(attr, tuple):
         return tuple(getattribute_from_module(module, a) for a in attr)
+    if isinstance(attr, dict):
+        return {k: getattribute_from_module(module, v) for k, v in attr.items()}
     if hasattr(module, attr):
         return getattr(module, attr)
     # Some of the mappings have entries model_type -> object of another model type. In that case we try to grab the

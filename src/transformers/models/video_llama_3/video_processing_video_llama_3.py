@@ -18,10 +18,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from typing import Optional, Union
+from typing import Optional
 
 import torch
-import torch.nn.functional as F
 
 from ...feature_extraction_utils import BatchFeature
 from ...image_utils import (
@@ -79,8 +78,6 @@ class VideoLlama3VideoProcessor(BaseVideoProcessor):
     do_rescale = True
     do_normalize = True
     do_convert_rgb = True
-    min_pixels = 128 * 28 * 28
-    max_pixels = 28 * 28 * 768
     patch_size = 14
     temporal_patch_size = 1
     merge_size = 2
@@ -107,16 +104,31 @@ class VideoLlama3VideoProcessor(BaseVideoProcessor):
         if "shortest_edge" not in size or "longest_edge" not in size:
             raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
 
-        super().__init__(size=size, min_pixels=min_pixels, max_pixels=max_pixels, **kwargs)
+        super().__init__(size=size, **kwargs)
+
+    def _standardize_kwargs(
+        self,
+        size: SizeDict | None = None,
+        min_pixels: int | None = None,
+        max_pixels: int | None = None,
+        **kwargs,
+    ) -> dict:
+        if min_pixels is not None and max_pixels is not None:
+            size = SizeDict(shortest_edge=min_pixels, longest_edge=max_pixels)
+        kwargs = super()._standardize_kwargs(size=size, **kwargs)
+        size = kwargs.get("size", self.size)
+        if not size.shortest_edge or not size.longest_edge:
+            raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
+        return kwargs
 
     def sample_frames(
         self,
         metadata: VideoMetadata,
-        temporal_patch_size: Optional[int] = None,
-        min_frames: Optional[int] = None,
-        max_frames: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        fps: Optional[Union[int, float]] = None,
+        temporal_patch_size: int | None = None,
+        min_frames: int | None = None,
+        max_frames: int | None = None,
+        num_frames: int | None = None,
+        fps: int | float | None = None,
         **kwargs,
     ):
         """
@@ -185,14 +197,12 @@ class VideoLlama3VideoProcessor(BaseVideoProcessor):
         do_convert_rgb: bool,
         do_resize: bool,
         size: SizeDict,
-        interpolation: Optional["F.InterpolationMode"],
+        resample: "PILImageResampling | int | None",
         do_rescale: bool,
         rescale_factor: float,
         do_normalize: bool,
         image_mean: float | list[float] | None,
         image_std: float | list[float] | None,
-        min_pixels: int | None = None,
-        max_pixels: int | None = None,
         patch_size: int | None = None,
         temporal_patch_size: int | None = None,
         merge_size: int | None = None,
@@ -212,13 +222,13 @@ class VideoLlama3VideoProcessor(BaseVideoProcessor):
                     height,
                     width,
                     factor=patch_size * merge_size,
-                    min_pixels=min_pixels,
-                    max_pixels=max_pixels // shape[0],
+                    min_pixels=size["shortest_edge"],
+                    max_pixels=size["longest_edge"] // shape[0],
                 )
                 stacked_videos = self.resize(
                     image=stacked_videos,
                     size=SizeDict(height=resized_height, width=resized_width),
-                    interpolation=interpolation,
+                    resample=resample,
                 )
             resized_videos_grouped[shape] = stacked_videos
         resized_videos = reorder_videos(resized_videos_grouped, grouped_videos_index)
@@ -272,7 +282,9 @@ class VideoLlama3VideoProcessor(BaseVideoProcessor):
         processed_grids = reorder_videos(processed_grids, grouped_videos_index)
         pixel_values_videos = torch.cat(processed_videos, dim=0)
         video_grid_thw = torch.tensor(processed_grids)
-        video_merge_sizes = torch.tensor([merge_size] * video_grid_thw.size(0)).to(video_grid_thw)
+        video_merge_sizes = torch.full(
+            (video_grid_thw.size(0),), merge_size, dtype=video_grid_thw.dtype, device=video_grid_thw.device
+        )
 
         if use_token_compression:
             video_compression_mask = self._get_compression_mask(

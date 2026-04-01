@@ -21,8 +21,7 @@ import requests
 
 from transformers import VitPoseBackboneConfig, VitPoseConfig
 from transformers.testing_utils import require_torch, require_vision, slow, torch_device
-from transformers.utils import is_torch_available, is_vision_available
-from transformers.utils.import_utils import get_torch_major_and_minor_version
+from transformers.utils import is_torch_available, is_torchvision_available, is_vision_available
 
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
@@ -37,6 +36,8 @@ if is_torch_available():
 if is_vision_available():
     from PIL import Image
 
+
+if is_torchvision_available():
     from transformers import VitPoseImageProcessor
 
 
@@ -152,12 +153,10 @@ class VitPoseModelTest(ModelTesterMixin, unittest.TestCase):
     all_model_classes = (VitPoseForPoseEstimation,) if is_torch_available() else ()
 
     test_resize_embeddings = False
-    test_torch_exportable = True
-    test_torch_exportable_strictly = get_torch_major_and_minor_version() != "2.7"
 
     def setUp(self):
         self.model_tester = VitPoseModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=VitPoseConfig, has_text_modality=False, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=VitPoseConfig, has_text_modality=False, hidden_size=32)
 
     def test_config(self):
         self.config_tester.create_and_test_config_to_json_string()
@@ -182,20 +181,20 @@ class VitPoseModelTest(ModelTesterMixin, unittest.TestCase):
     def test_model_get_set_embeddings(self):
         pass
 
-    @unittest.skip(reason="VitPose does not support training yet")
+    @unittest.skip(reason="This module does not support standalone training")
     def test_training(self):
         pass
 
-    @unittest.skip(reason="VitPose does not support training yet")
+    @unittest.skip(reason="This module does not support standalone training")
     def test_training_gradient_checkpointing(self):
         pass
 
-    @unittest.skip(reason="VitPose does not support training yet")
-    def test_training_gradient_checkpointing_use_reentrant(self):
+    @unittest.skip(reason="This module does not support standalone training")
+    def test_training_gradient_checkpointing_use_reentrant_false(self):
         pass
 
-    @unittest.skip(reason="VitPose does not support training yet")
-    def test_training_gradient_checkpointing_use_reentrant_false(self):
+    @unittest.skip(reason="This module does not support standalone training")
+    def test_training_gradient_checkpointing_use_reentrant_true(self):
         pass
 
     def test_forward_signature(self):
@@ -312,7 +311,6 @@ class VitPoseModelIntegrationTest(unittest.TestCase):
         assert torch.allclose(heatmaps[0, 0, :3, :3], expected_slice, atol=1e-4)
 
         pose_results = image_processor.post_process_pose_estimation(outputs, boxes=boxes)
-        print(pose_results)
 
         expected_bbox = torch.tensor([391.9900, 190.0800, 391.1575, 189.3034])
         expected_keypoints = torch.tensor(

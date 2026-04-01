@@ -125,15 +125,17 @@ print(outputs)
 
 [[autodoc]] Cohere2VisionForConditionalGeneration
     - forward
+    - get_image_features
 
 ## Cohere2VisionModel
 
 [[autodoc]] Cohere2VisionModel
     - forward
+    - get_image_features
 
-## Cohere2VisionImageProcessorFast
+## Cohere2VisionImageProcessor
 
-[[autodoc]] Cohere2VisionImageProcessorFast
+[[autodoc]] Cohere2VisionImageProcessor
     - preprocess
 
 ## Cohere2VisionProcessor

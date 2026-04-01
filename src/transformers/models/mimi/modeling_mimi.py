@@ -24,7 +24,7 @@ from torch import nn
 from ... import initialization as init
 from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache, StaticCache
-from ...masking_utils import create_causal_mask
+from ...masking_utils import create_sliding_window_causal_mask
 from ...modeling_flash_attention_utils import flash_attn_supports_top_left_mask, is_flash_attn_available
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutputWithPast
@@ -97,17 +97,42 @@ class MimiConv1dPaddingCache:
             raise ValueError(
                 f"Expected `num_layers` ({num_layers}) values in `per_layer_padding`, `per_layer_padding_mode` and `per_layer_in_channels`"
             )
-        elif not all(mode in ["constant", "replicate"] for mode in per_layer_padding_mode):
-            raise NotImplementedError(
-                "`padding_cache` is not supported for convolutions using other than `constant` or `replicate` padding mode"
-            )
 
         self.per_layer_padding = per_layer_padding
         self.per_layer_padding_mode = per_layer_padding_mode
         self.per_layer_in_channels = per_layer_in_channels
-        self.per_layer_is_init = [True] * num_layers
 
         self.padding_cache = [None] * num_layers
+
+    def _cache_init(self, hidden_states: torch.Tensor, layer_idx: int):
+        """
+        Initialize the cache for a specific layer.
+
+        Parameters:
+            hidden_states (`torch.Tensor`):
+                The hidden states to initialize the cache with.
+            layer_idx (`int`):
+                The index of the layer to initialize the cache for.
+        Returns:
+            `torch.Tensor`, the initialized cache.
+        """
+        batch_size, dtype, device = hidden_states.shape[0], hidden_states.dtype, hidden_states.device
+        padding, padding_mode, in_channels = (
+            self.per_layer_padding[layer_idx],
+            self.per_layer_padding_mode[layer_idx],
+            self.per_layer_in_channels[layer_idx],
+        )
+
+        if padding_mode == "constant":
+            current_cache = torch.zeros(batch_size, in_channels, padding, device=device, dtype=dtype)
+        elif padding_mode == "replicate":
+            current_cache = (
+                torch.ones(batch_size, in_channels, padding, device=device, dtype=dtype) * hidden_states[..., :1]
+            )
+        else:
+            raise NotImplementedError(f"Padding mode {padding_mode} not supported")
+
+        return current_cache
 
     def update(self, hidden_states: torch.Tensor, layer_idx: int):
         """
@@ -122,40 +147,24 @@ class MimiConv1dPaddingCache:
             `torch.Tensor` or `None`, the current padding cache.
         """
         batch_size, dtype, device = hidden_states.shape[0], hidden_states.dtype, hidden_states.device
-        padding = self.per_layer_padding[layer_idx]
-        padding_mode = self.per_layer_padding_mode[layer_idx]
-        in_channels = self.per_layer_in_channels[layer_idx]
+        padding, in_channels = self.per_layer_padding[layer_idx], self.per_layer_in_channels[layer_idx]
 
         if self.padding_cache[layer_idx] is None:
-            if padding_mode == "constant":
-                current_cache = torch.zeros(
-                    batch_size,
-                    in_channels,
-                    padding,
-                    device=device,
-                    dtype=dtype,
-                )
-            elif padding_mode == "replicate":
-                current_cache = (
-                    torch.ones(
-                        batch_size,
-                        in_channels,
-                        padding,
-                        device=device,
-                        dtype=dtype,
-                    )
-                    * hidden_states[..., :1]
-                )
+            current_cache = self._cache_init(hidden_states, layer_idx)
         else:
             current_cache = self.padding_cache[layer_idx]
 
         # update the cache
         if padding > 0:
-            padding_states = hidden_states[:, :, -padding:]
+            shortfall = max(0, padding - hidden_states.shape[-1])
+            if shortfall > 0:
+                padding_states = torch.cat([current_cache[:, :, -shortfall:], hidden_states], dim=-1)
+            else:
+                padding_states = hidden_states[:, :, -padding:]
         else:
-            padding_states = torch.empty(batch_size, in_channels, padding, dtype=dtype, device=device)
-        self.padding_cache[layer_idx] = padding_states
+            padding_states = torch.empty(batch_size, in_channels, 0, dtype=dtype, device=device)
 
+        self.padding_cache[layer_idx] = padding_states
         return current_cache
 
 
@@ -577,7 +586,7 @@ def rotate_half(x):
 
 
 # Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -585,8 +594,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
         k (`torch.Tensor`): The key tensor.
         cos (`torch.Tensor`): The cosine part of the rotary embedding.
         sin (`torch.Tensor`): The sine part of the rotary embedding.
-        position_ids (`torch.Tensor`, *optional*):
-            Deprecated and unused.
         unsqueeze_dim (`int`, *optional*, defaults to 1):
             The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
             sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
@@ -681,7 +688,7 @@ class MimiAttention(nn.Module):
         past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        cache_position: torch.LongTensor | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -697,18 +704,15 @@ class MimiAttention(nn.Module):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) * self.scaling
 
-        if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
@@ -757,7 +761,7 @@ class MimiFlashAttention2(MimiAttention):
         past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        cache_position: torch.LongTensor | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         if isinstance(past_key_values, StaticCache):
             raise ValueError(
@@ -784,9 +788,7 @@ class MimiFlashAttention2(MimiAttention):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
         # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
         # to be able to avoid many of these transpose/reshape/view.
@@ -805,15 +807,10 @@ class MimiFlashAttention2(MimiAttention):
         input_dtype = query_states.dtype
         device_type = query_states.device.type if query_states.device.type != "mps" else "cpu"
         if input_dtype == torch.float32:
-            if torch.is_autocast_enabled():
-                # NOTE: `torch.get_autocast_dtype` is there starting from PyTorch 2.4
-                target_dtype = (
-                    torch.get_autocast_dtype(device_type)
-                    if hasattr(torch, "get_autocast_dtype")
-                    else torch.get_autocast_gpu_dtype()
-                )
+            if torch.is_autocast_enabled(device_type):
+                target_dtype = torch.get_autocast_dtype(device_type)
             # Handle the case where the model is quantized
-            elif hasattr(self.config, "quantization_config"):
+            elif hasattr(self.config, "_is_quantized"):
                 target_dtype = self.config.dtype
             else:
                 target_dtype = self.q_proj.weight.dtype
@@ -868,7 +865,6 @@ class MimiSdpaAttention(MimiAttention):
         past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        cache_position: torch.LongTensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         if output_attentions:
@@ -890,9 +886,7 @@ class MimiSdpaAttention(MimiAttention):
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_values is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -900,13 +894,6 @@ class MimiSdpaAttention(MimiAttention):
         causal_mask = attention_mask
         if attention_mask is not None:
             causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
-
-        # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-        # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        if query_states.device.type == "cuda" and causal_mask is not None:
-            query_states = query_states.contiguous()
-            key_states = key_states.contiguous()
-            value_states = value_states.contiguous()
 
         # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
@@ -957,7 +944,6 @@ class MimiTransformerLayer(GradientCheckpointingLayer):
         past_key_values: Cache | None = None,
         output_attentions: bool | None = False,
         use_cache: bool | None = False,
-        cache_position: torch.LongTensor | None = None,
         **kwargs,
     ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
         """
@@ -973,8 +959,6 @@ class MimiTransformerLayer(GradientCheckpointingLayer):
                 If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
                 (see `past_key_values`).
             past_key_values (`Cache`, *optional*): cached past key and value projection states
-            cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
-                Indices depicting the position of the input sequence tokens in the sequence
             kwargs (`dict`, *optional*):
                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
                 into the model
@@ -991,7 +975,6 @@ class MimiTransformerLayer(GradientCheckpointingLayer):
             past_key_values=past_key_values,
             output_attentions=output_attentions,
             use_cache=use_cache,
-            cache_position=cache_position,
             **kwargs,
         )
         hidden_states = residual + self.self_attn_layer_scale(hidden_states)
@@ -1039,7 +1022,7 @@ class MimiTransformerModel(nn.Module):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        cache_position: torch.LongTensor | None = None,
+        **kwargs,
     ) -> tuple | BaseModelOutputWithPast:
         """
         Args:
@@ -1094,7 +1077,7 @@ class MimiTransformerModel(nn.Module):
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if self.gradient_checkpointing and self.training and use_cache:
             logger.warning_once(
@@ -1105,20 +1088,15 @@ class MimiTransformerModel(nn.Module):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
 
-        if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
-            )
-
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device) + past_seen_tokens
+            position_ids = position_ids.unsqueeze(0)
 
-        causal_mask = create_causal_mask(
+        causal_mask = create_sliding_window_causal_mask(
             config=self.config,
-            input_embeds=hidden_states,
+            inputs_embeds=hidden_states,
             attention_mask=attention_mask,
-            cache_position=cache_position,
             past_key_values=past_key_values,
             position_ids=position_ids,
         )
@@ -1138,7 +1116,6 @@ class MimiTransformerModel(nn.Module):
                 past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
-                cache_position=cache_position,
             )
 
             hidden_states = layer_outputs[0]
@@ -1482,6 +1459,7 @@ class MimiModel(MimiPreTrainedModel):
         padding_mask: int,
         past_key_values: Cache | None = None,
         padding_cache: MimiConv1dPaddingCache | None = None,
+        use_streaming: bool | None = None,
         return_dict: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
@@ -1493,7 +1471,10 @@ class MimiModel(MimiPreTrainedModel):
 
         # TODO: @eustlb, convert the padding mask to attention mask.
         encoder_outputs = self.encoder_transformer(
-            embeddings.transpose(1, 2), past_key_values=past_key_values, return_dict=return_dict
+            embeddings.transpose(1, 2),
+            past_key_values=past_key_values,
+            use_cache=use_streaming,
+            return_dict=return_dict,
         )
         if return_dict:
             past_key_values = encoder_outputs.get("past_key_values")
@@ -1616,6 +1597,7 @@ class MimiModel(MimiPreTrainedModel):
             padding_mask.bool(),
             past_key_values=encoder_past_key_values,
             padding_cache=padding_cache,
+            use_streaming=use_streaming,
             return_dict=return_dict,
         )
 

@@ -206,6 +206,7 @@ model = AutoModelForImageTextToText.from_pretrained("PaddlePaddle/PaddleOCR-VL",
 
 [[autodoc]] PaddleOCRVLForConditionalGeneration
     - forward
+    - get_image_features
 
 ## PaddleOCRVLConfig
 
@@ -230,10 +231,12 @@ model = AutoModelForImageTextToText.from_pretrained("PaddlePaddle/PaddleOCR-VL",
 ## PaddleOCRVLImageProcessor
 
 [[autodoc]] PaddleOCRVLImageProcessor
+    - preprocess
 
-## PaddleOCRVLImageProcessorFast
+## PaddleOCRVLImageProcessorPil
 
-[[autodoc]] PaddleOCRVLImageProcessorFast
+[[autodoc]] PaddleOCRVLImageProcessorPil
+    - preprocess
 
 ## PaddleOCRVLModel
 

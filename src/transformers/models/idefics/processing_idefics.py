@@ -15,7 +15,6 @@
 Processor class for IDEFICS.
 """
 
-from typing import Optional, Union
 from urllib.parse import urlparse
 
 from ...feature_extraction_utils import BatchFeature
@@ -48,8 +47,8 @@ class IdeficsTextKwargs(TextKwargs, total=False):
         particularly important for chat-based models.
     """
 
-    add_eos_token: Optional[bool]
-    add_end_of_utterance_token: Optional[bool]
+    add_eos_token: bool | None
+    add_end_of_utterance_token: bool | None
 
 
 class IdeficsProcessorKwargs(ProcessingKwargs, total=False):
@@ -172,15 +171,13 @@ class IdeficsProcessor(ProcessorMixin):
     @auto_docstring
     def __call__(
         self,
-        images: Union[ImageInput, list[ImageInput], str, list[str], list[list[str]]] = None,
-        text: Union[
-            TextInput,
-            PreTokenizedInput,
-            list[TextInput],
-            list[PreTokenizedInput],
-            list[list[TextInput]],
-            list[list[PreTokenizedInput]],
-        ] = None,
+        images: ImageInput | list[ImageInput] | str | list[str] | list[list[str]] = None,
+        text: TextInput
+        | PreTokenizedInput
+        | list[TextInput]
+        | list[PreTokenizedInput]
+        | list[list[TextInput]]
+        | list[list[PreTokenizedInput]] = None,
         **kwargs: Unpack[IdeficsProcessorKwargs],
     ) -> BatchFeature:
         r"""
@@ -342,7 +339,8 @@ class IdeficsProcessor(ProcessorMixin):
             if add_eos_token:
                 full_text += self.tokenizer.eos_token
 
-            image_objects = self.image_processor(image_objects, **output_kwargs["images_kwargs"])
+            if len(image_objects) > 0:
+                image_objects = self.image_processor(image_objects, **output_kwargs["images_kwargs"])
 
             all_prompts.append(full_text)
             all_images.append(image_objects)
@@ -366,7 +364,6 @@ class IdeficsProcessor(ProcessorMixin):
             padded_input_ids = text_single
             image_count = padded_input_ids.count(self.image_token_id)
             local_max_num_images = min(image_count, max_num_images)
-
             current_images = extracted_images[:local_max_num_images]
 
             if len(current_images) > 0:

@@ -18,7 +18,6 @@ import unittest
 from transformers import AutoTokenizer, GraniteMoeConfig, is_torch_available
 from transformers.testing_utils import (
     Expectations,
-    require_read_token,
     require_torch,
     require_torch_accelerator,
     slow,
@@ -180,7 +179,7 @@ class GraniteMoeModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.Test
 
     def setUp(self):
         self.model_tester = GraniteMoeModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=GraniteMoeConfig, hidden_size=37)
+        self.config_tester = ConfigTester(self, config_class=GraniteMoeConfig, hidden_size=32)
 
     def test_config(self):
         self.config_tester.run_common_tests()
@@ -193,7 +192,6 @@ class GraniteMoeModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.Test
 @require_torch_accelerator
 class GraniteMoeIntegrationTest(unittest.TestCase):
     @slow
-    @require_read_token
     def test_model_3b_logits(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
 

@@ -519,7 +519,7 @@ ALL_FILE_TYPES = (
     "configuration",
     "tokenization",
     "processing",
-    "image_processing.*_fast",
+    "image_processing_pil",
     "image_processing",
     "video_processing",
     "feature_extraction",
@@ -904,8 +904,8 @@ def replace_class_node(
     Returns:
         A new class node corresponding to the modular definition.
     """
-    all_bases = [get_full_attribute_name(k.value) for k in modular_class_node.bases]
-    if any(base is None for base in all_bases):
+    all_new_bases = {get_full_attribute_name(k.value): k for k in modular_class_node.bases}
+    if any(base is None for base in all_new_bases.keys()):
         raise ValueError(f"Could not parse the name of the bases for {modular_class_node.name.value}")
 
     original_modeling_node = mapper.classes[renamed_super_class]
@@ -924,7 +924,7 @@ def replace_class_node(
 
     # If we explicitly passed a new base with common suffix to an old base, it is for switching the prefix
     # e.g. if the "natural" parent class is `PreTrainedModel` but we wanted to rename it to `PreTrainedVisionModel`
-    additional_bases = [base for base in all_bases if base != original_super_class]
+    additional_bases = {base for base in all_new_bases.keys() if base != original_super_class}
     new_class_bases = []
     for original_base in original_modeling_node.bases:
         new_base = original_base
@@ -936,8 +936,20 @@ def replace_class_node(
                 if len(suffix) > 0 and suffix[0].isupper():
                     new_name_node = original_base.value.with_changes(value=additional_base_name)
                     new_base = original_base.with_changes(value=new_name_node)
+                    # Remove from set
+                    additional_bases.discard(additional_base_name)
                     break
         new_class_bases.append(new_base)
+    # Add potential additional classes that may not be inherited as the parent does not use them, and that were not
+    # already replaced above
+    original_bases = {get_full_attribute_name(k.value) for k in original_modeling_node.bases}
+    new_class_bases.extend(
+        [all_new_bases[added_base] for added_base in additional_bases if added_base not in original_bases]
+    )
+    # If we have both `nn.Module` and `GradientCheckpointingLayer`, remove `nn.Module`
+    new_class_bases_names = {get_full_attribute_name(k.value) for k in new_class_bases}
+    if "nn.Module" in new_class_bases_names and "GradientCheckpointingLayer" in new_class_bases_names:
+        new_class_bases = [k for k in new_class_bases if get_full_attribute_name(k.value) != "nn.Module"]
 
     # Use class decorators redefined in modular file if any
     new_class_decorators = (
@@ -963,6 +975,9 @@ def replace_class_node(
     modular_class_attributes = {}
     for node in modular_class_node.body.body:
         if m.matches(node, m.SimpleStatementLine(body=[m.Assign()])):
+            if hasattr(node.body[0].value, "func") and node.body[0].value.func.value == "AttributeError":
+                original_modeling_class_attributes.pop(node.body[0].targets[0].target.value)
+                continue  # delete unnecessary cls attribute, especially in configs
             modular_class_attributes[node.body[0].targets[0].target.value] = node
         elif m.matches(node, m.SimpleStatementLine(body=[m.AnnAssign()])):
             modular_class_attributes[node.body[0].target.value] = node
@@ -1011,7 +1026,9 @@ def replace_class_node(
             modular_node = modular_methods[name]
 
             # If we match the pattern, we should avoid inheriting the method
-            if re.match(r"\ndef .*\(.*\):\n    raise.*Error\(.*", mapper.python_module.code_for_node(modular_node)):
+            if re.match(
+                r"\ndef .*\(.*\).*:.*\n    raise.*Error\(.*", mapper.python_module.code_for_node(modular_node)
+            ):
                 continue
 
             # Compute new method docstring
@@ -1079,10 +1096,9 @@ TYPE_TO_FILE_TYPE = {
     "Tokenizer": "tokenization",
     "Processor": "processing",
     "ImageProcessor": "image_processing",
-    "ImageProcessorFast": "image_processing.*_fast",  # "*" indicates where to insert the model name before the "_fast" suffix
+    "ImageProcessorPil": "image_processing_pil",
     "VideoProcessor": "video_processing",
     "VideoProcessorInitKwargs": "video_processing",
-    "FastImageProcessorKwargs": "image_processing.*_fast",
     "ImageProcessorKwargs": "image_processing",
     "FeatureExtractor": "feature_extraction",
     "ProcessorKwargs": "processing",
@@ -1181,6 +1197,110 @@ def get_needed_imports(body: dict[str, dict], all_imports: list[cst.CSTNode]) ->
 
     # Protected imports always appear at the end of all imports
     return usual_import_nodes + protected_import_nodes
+
+
+def _ensure_utils_availability_imports(imports: list[cst.CSTNode], needed: set[str]) -> list[cst.CSTNode]:
+    """Add is_torch_available and/or is_torchvision_available to the utils import if needed."""
+    if not needed:
+        return imports
+
+    for i, node in enumerate(imports):
+        if m.matches(node, m.SimpleStatementLine(body=[m.ImportFrom()])):
+            import_from = node.body[0]
+            if not isinstance(import_from, cst.ImportFrom) or import_from.module is None:
+                continue
+            module_str = import_from.module
+            if isinstance(module_str, cst.Name):
+                module_name = module_str.value
+            elif isinstance(module_str, cst.Attribute):
+                parts = []
+                n = module_str
+                while isinstance(n, cst.Attribute):
+                    parts.append(n.attr.value)
+                    n = n.value
+                if isinstance(n, cst.Name):
+                    parts.append(n.value)
+                    module_name = ".".join(reversed(parts))
+                else:
+                    continue
+            else:
+                continue
+            # Match ...utils or transformers.utils
+            if not (module_name.endswith(".utils") or module_name == "utils"):
+                continue
+            existing = {a.name.value for a in import_from.names if isinstance(a.name, cst.Name)}
+            to_add = [n for n in needed if n not in existing]
+            if not to_add:
+                continue
+            new_names = list(import_from.names)
+            for name in to_add:
+                new_names.append(cst.ImportAlias(name=cst.Name(value=name)))
+            new_import_from = import_from.with_changes(names=new_names)
+            new_node = node.with_changes(body=[new_import_from])
+            return imports[:i] + [new_node] + imports[i + 1 :]
+    # No utils import found - add one (PIL files use ...utils for transformers.models.xxx)
+    new_import = cst.parse_statement("from ...utils import " + ", ".join(sorted(needed)))
+    return [new_import] + imports
+
+
+def protect_torch_imports_for_pil(imports: list[cst.CSTNode]) -> list[cst.CSTNode]:
+    """
+    For PIL image processor files, collect all torch/torchvision imports — whether bare or
+    already wrapped in a guard — into a single `if is_torch_available():` /
+    `if is_torchvision_available():` block each. Add the required availability checks to the
+    utils import.
+
+    Pre-existing guarded blocks (no else clause) are absorbed so we never emit duplicate guards
+    for the same library.
+    """
+    torch_stmts: list[cst.CSTNode] = []
+    torchvision_stmts: list[cst.CSTNode] = []
+    other_imports: list[cst.CSTNode] = []
+    torch_needed: set[str] = set()
+    torchvision_needed: set[str] = set()
+
+    def _code(node: cst.CSTNode) -> str:
+        return cst.Module(body=[node]).code.strip()
+
+    for node in imports:
+        if m.matches(node, m.If()):
+            # Absorb simple torch/torchvision guards (no else) to merge into one combined block.
+            node_code = _code(node)
+            if "is_torch_available()" in node_code and node.orelse is None:
+                torch_stmts.extend(node.body.body)
+                torch_needed.add("is_torch_available")
+            elif "is_torchvision_available()" in node_code and node.orelse is None:
+                torchvision_stmts.extend(node.body.body)
+                torchvision_needed.add("is_torchvision_available")
+            else:
+                other_imports.append(node)
+        elif m.matches(node, m.SimpleStatementLine(body=[m.Import() | m.ImportFrom()])):
+            node_code = _code(node)
+            # Check torchvision before torch — "torchvision" starts with "torch"
+            if node_code.startswith("import torchvision") or node_code.startswith("from torchvision"):
+                torchvision_stmts.append(node)
+                torchvision_needed.add("is_torchvision_available")
+            elif node_code.startswith("import torch") or node_code.startswith("from torch"):
+                torch_stmts.append(node)
+                torch_needed.add("is_torch_available")
+            else:
+                other_imports.append(node)
+        else:
+            other_imports.append(node)
+
+    result: list[cst.CSTNode] = []
+    if torch_stmts:
+        body = "\n    ".join(_code(s) for s in torch_stmts)
+        result.append(cst.parse_statement(f"if is_torch_available():\n    {body}"))
+    if torchvision_stmts:
+        body = "\n    ".join(_code(s) for s in torchvision_stmts)
+        result.append(cst.parse_statement(f"if is_torchvision_available():\n    {body}"))
+
+    if availability_needed := torch_needed | torchvision_needed:
+        other_imports = _ensure_utils_availability_imports(other_imports, availability_needed)
+
+    # Protected imports at the end (after usual_import_nodes in get_needed_imports order)
+    return other_imports + result
 
 
 def split_all_assignment(node: cst.CSTNode, model_name: str) -> dict[str, cst.CSTNode]:
@@ -1572,6 +1692,10 @@ def check_dependencies_and_create_import_node(
         class_file_type = find_file_type(class_name, new_name)
         # In this case, we need to remove it from the dependencies and create a new import instead
         if class_file_type != file_type:
+            # image_processing_pil and image_processing must never depend on each other.
+            # When a PIL class needs an image_processing class, inline it instead of importing.
+            if file_type == "image_processing_pil" and class_file_type == "image_processing":
+                continue
             corrected_dependencies.remove(class_name)
             import_statement = f"from .{class_file_type}_{new_name} import {class_name}"
             new_imports[class_name] = cst.parse_statement(import_statement)
@@ -1624,7 +1748,14 @@ def get_class_node_and_dependencies(
         # Remove all classes explicitly defined in modular from the dependencies. Otherwise, if a class is referenced
         # before its new modular definition, it may be wrongly imported from elsewhere as a dependency if it matches
         # another class from a modeling file after renaming, even though it would be added after anyway (leading to duplicates)
-        new_node_dependencies -= set(modular_mapper.classes.keys())
+        # Exception: for image_processing_pil files, image_processing modular classes must be inlined (not excluded),
+        # because these two files must never import from each other.
+        classes_to_exclude = set(modular_mapper.classes.keys())
+        if file_type == "image_processing_pil":
+            classes_to_exclude -= {
+                k for k in classes_to_exclude if find_file_type(k, model_name) == "image_processing"
+            }
+        new_node_dependencies -= classes_to_exclude
 
         # The node was modified -> look for all recursive dependencies of the new node
         all_dependencies_to_add = find_all_dependencies(
@@ -1635,7 +1766,13 @@ def get_class_node_and_dependencies(
 
         relative_dependency_order = mapper.compute_relative_order(all_dependencies_to_add)
         nodes_to_add = {
-            dep: (relative_dependency_order[dep], mapper.global_nodes[dep]) for dep in all_dependencies_to_add
+            dep: (
+                relative_dependency_order[dep],
+                # If this dependency is explicitly defined in the modular, prefer the modular's version.
+                # This prevents a renamed parent class from overriding a modular-defined class of the same name.
+                modular_mapper.global_nodes[dep] if dep in modular_mapper.classes else mapper.global_nodes[dep],
+            )
+            for dep in all_dependencies_to_add
         }
 
     # No transformers (modeling file) super class, just check functions and assignments dependencies
@@ -1729,6 +1866,9 @@ def create_modules(
     for file, body in files.items():
         new_body = [k[1]["node"] for k in sorted(body.items(), key=lambda x: x[1]["insert_idx"])]
         needed_imports = get_needed_imports(body, all_imports)
+
+        if file == "image_processing_pil":
+            needed_imports = protect_torch_imports_for_pil(needed_imports)
 
         if package_name != "transformers":
             # Convert all transformers relative imports to absolute ones

@@ -11,10 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Union
+from typing import Union
 
-import torch
-from torchvision.ops import masks_to_boxes
+from ...utils import is_torch_available
+
+
+if is_torch_available():
+    import torch
+
+from ...utils import is_torchvision_available
+
+
+if is_torchvision_available():
+    from torchvision.ops import masks_to_boxes
 
 from ...image_utils import ImageInput
 from ...processing_utils import ProcessorMixin
@@ -25,7 +34,7 @@ from ...video_utils import VideoInput
 from .modeling_sam3_video import Sam3VideoInferenceSession
 
 
-@requires(backends=("torch",))
+@requires(backends=("torch", "torchvision"))
 @auto_docstring
 class Sam3VideoProcessor(ProcessorMixin):
     def __init__(
@@ -33,7 +42,7 @@ class Sam3VideoProcessor(ProcessorMixin):
         image_processor,
         video_processor,
         tokenizer,
-        target_size: Optional[int] = None,
+        target_size: int | None = None,
         **kwargs,
     ):
         r"""
@@ -46,10 +55,10 @@ class Sam3VideoProcessor(ProcessorMixin):
     @auto_docstring
     def __call__(
         self,
-        images: Optional[ImageInput] = None,
-        segmentation_maps: Optional[ImageInput] = None,
-        original_sizes: Optional[Union[list[list[float]], torch.Tensor]] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
+        images: ImageInput | None = None,
+        segmentation_maps: ImageInput | None = None,
+        original_sizes: list[list[float]] | torch.Tensor | None = None,
+        return_tensors: str | TensorType | None = None,
         **kwargs,
     ) -> BatchEncoding:
         r"""
@@ -89,7 +98,7 @@ class Sam3VideoProcessor(ProcessorMixin):
 
         return encoding_image_processor
 
-    def add_text_prompt(self, inference_session: Sam3VideoInferenceSession, text: Union[str, list[str]]):
+    def add_text_prompt(self, inference_session: Sam3VideoInferenceSession, text: str | list[str]):
         """
         Add text prompt(s) to the inference session.
 
@@ -123,11 +132,11 @@ class Sam3VideoProcessor(ProcessorMixin):
 
     def init_video_session(
         self,
-        video: Optional[VideoInput] = None,
+        video: VideoInput | None = None,
         inference_device: Union[str, "torch.device"] = "cpu",
-        inference_state_device: Optional[Union[str, "torch.device"]] = None,
-        processing_device: Optional[Union[str, "torch.device"]] = None,
-        video_storage_device: Optional[Union[str, "torch.device"]] = None,
+        inference_state_device: Union[str, "torch.device"] | None = None,
+        processing_device: Union[str, "torch.device"] | None = None,
+        video_storage_device: Union[str, "torch.device"] | None = None,
         max_vision_features_cache_size: int = 1,
         dtype: torch.dtype = torch.float32,
     ):
@@ -239,7 +248,7 @@ class Sam3VideoProcessor(ProcessorMixin):
         self,
         inference_session,
         model_outputs,
-        original_sizes: Optional[Union[list[list[float]], torch.Tensor]] = None,
+        original_sizes: list[list[float]] | torch.Tensor | None = None,
     ):
         """
         Post-process model outputs to get final masks, boxes, and scores.

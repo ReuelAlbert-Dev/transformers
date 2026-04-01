@@ -17,7 +17,6 @@ Processor class for LLaVa-Onevision.
 
 import math
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import numpy as np
 
@@ -92,9 +91,9 @@ class LlavaOnevisionProcessor(ProcessorMixin):
     @auto_docstring
     def __call__(
         self,
-        images: Optional[ImageInput] = None,
-        text: Union[TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]] = None,
-        videos: Optional[VideoInput] = None,
+        images: ImageInput | None = None,
+        text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] = None,
+        videos: VideoInput | None = None,
         **kwargs: Unpack[LlavaOnevisionProcessorKwargs],
     ) -> BatchFeature:
         r"""
@@ -157,17 +156,13 @@ class LlavaOnevisionProcessor(ProcessorMixin):
         self._check_special_mm_tokens(text, text_inputs, modalities=["image"])
 
         if return_mm_token_type_ids:
-            array_ids = np.array(text_inputs["input_ids"])
-            mm_token_type_ids = np.zeros_like(text_inputs["input_ids"])
-            mm_token_type_ids[array_ids == self.image_token_id] = 1
-            text_inputs["mm_token_type_ids"] = mm_token_type_ids.tolist()
-
+            text_inputs["mm_token_type_ids"] = self.create_mm_token_type_ids(text_inputs["input_ids"])
         return BatchFeature(data={**text_inputs, **image_inputs, **video_inputs}, tensor_type=return_tensors)
 
     def _expand_image_tokens(
         self,
         text: list[TextInput],
-        image_sizes: Iterable[Union[list[int], int]],
+        image_sizes: Iterable[list[int] | int],
         height: int,
         width: int,
         special_token: str,

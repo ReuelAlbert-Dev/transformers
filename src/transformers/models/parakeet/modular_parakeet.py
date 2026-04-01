@@ -27,7 +27,8 @@ from ...modeling_outputs import BaseModelOutput, CausalLMOutput
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import ModelOutput, TransformersKwargs, auto_docstring, can_return_tuple
-from ...utils.generic import check_model_inputs, maybe_autocast
+from ...utils.generic import maybe_autocast, merge_with_config_defaults
+from ...utils.output_capturing import capture_outputs
 from ..fastspeech2_conformer.modeling_fastspeech2_conformer import FastSpeech2ConformerConvolutionModule
 from ..llama.modeling_llama import LlamaAttention, eager_attention_forward
 from .configuration_parakeet import ParakeetCTCConfig, ParakeetEncoderConfig
@@ -141,9 +142,9 @@ class ParakeetEncoderAttention(LlamaAttention):
         key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
 
         query_states_with_bias_u = query_states + self.bias_u.view(
             1, self.config.num_attention_heads, 1, self.head_dim
@@ -408,18 +409,19 @@ class ParakeetEncoder(ParakeetPreTrainedModel):
         self.post_init()
 
     @auto_docstring
-    @check_model_inputs
+    @merge_with_config_defaults
+    @capture_outputs
     @can_return_tuple
     def forward(
         self,
         input_features: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        output_attention_mask: bool | None = None,
+        output_attention_mask: bool = True,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutput:
         r"""
-        output_attention_mask (`bool`, *optional*):
-            Whether to return the output attention mask.
+        output_attention_mask (`bool`, *optional*, defaults to `True`):
+            Whether to return the output attention mask. Only effective when `attention_mask` is provided.
 
         Example:
 
@@ -473,7 +475,8 @@ class ParakeetEncoder(ParakeetPreTrainedModel):
                 )
 
         return ParakeetEncoderModelOutput(
-            last_hidden_state=hidden_states, attention_mask=output_mask.int() if output_attention_mask else None
+            last_hidden_state=hidden_states,
+            attention_mask=output_mask.int() if attention_mask is not None and output_attention_mask else None,
         )
 
 

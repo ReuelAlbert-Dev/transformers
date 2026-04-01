@@ -14,18 +14,17 @@
 """PyTorch LED model."""
 
 import math
-import warnings
 from dataclasses import dataclass
 
 import torch
 from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.nn import CrossEntropyLoss
 
 from ... import initialization as init
 from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache, EncoderDecoderCache
 from ...generation import GenerationMixin
-from ...modeling_attn_mask_utils import _create_4d_causal_attention_mask
+from ...masking_utils import create_bidirectional_mask, create_causal_mask
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
 from ...modeling_utils import PreTrainedModel
@@ -772,7 +771,6 @@ class LEDDecoderAttention(nn.Module):
         past_key_values: Cache | None = None,
         attention_mask: torch.Tensor | None = None,
         output_attentions: bool = False,
-        cache_position: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         """Input shape: Batch x Time x Channel"""
 
@@ -809,10 +807,7 @@ class LEDDecoderAttention(nn.Module):
 
             if past_key_values is not None:
                 # save all key/value_states to cache to be re-used for fast auto-regressive generation
-                cache_position = cache_position if not is_cross_attention else None
-                key_states, value_states = curr_past_key_values.update(
-                    key_states, value_states, self.layer_idx, {"cache_position": cache_position}
-                )
+                key_states, value_states = curr_past_key_values.update(key_states, value_states, self.layer_idx)
                 # set flag that curr layer for cross-attn is already updated so we can re-use in subsequent calls
                 if is_cross_attention and isinstance(past_key_values, EncoderDecoderCache):
                     past_key_values.is_updated[self.layer_idx] = True
@@ -923,9 +918,7 @@ class LEDEncoderLayer(GradientCheckpointingLayer):
         hidden_states = residual + hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
 
-        if hidden_states.dtype == torch.float16 and (
-            torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
-        ):
+        if hidden_states.dtype == torch.float16 and not torch.isfinite(hidden_states).all():
             clamp_value = torch.finfo(hidden_states.dtype).max - 1000
             hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
         return (hidden_states,) + attn_outputs[1:]
@@ -969,7 +962,7 @@ class LEDDecoderLayer(GradientCheckpointingLayer):
         past_key_values: Cache | None = None,
         output_attentions: bool | None = False,
         use_cache: bool | None = True,
-        cache_position: torch.Tensor | None = None,
+        **kwargs,
     ):
         """
         Args:
@@ -992,7 +985,6 @@ class LEDDecoderLayer(GradientCheckpointingLayer):
             past_key_values=past_key_values,
             attention_mask=attention_mask,
             output_attentions=output_attentions,
-            cache_position=cache_position,
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
@@ -1010,7 +1002,6 @@ class LEDDecoderLayer(GradientCheckpointingLayer):
                 attention_mask=encoder_attention_mask,
                 past_key_values=past_key_values,
                 output_attentions=output_attentions,
-                cache_position=cache_position,
             )
             hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
             hidden_states = residual + hidden_states
@@ -1429,7 +1420,7 @@ class LEDEncoder(LEDPreTrainedModel):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # check input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -1577,7 +1568,6 @@ class LEDDecoder(LEDPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
-        cache_position=None,
         **kwargs,
     ):
         r"""
@@ -1645,7 +1635,7 @@ class LEDDecoder(LEDPreTrainedModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -1672,26 +1662,22 @@ class LEDDecoder(LEDPreTrainedModel):
             past_key_values = EncoderDecoderCache(DynamicCache(config=self.config), DynamicCache(config=self.config))
 
         past_key_values_length = past_key_values.get_seq_length() if past_key_values is not None else 0
-        # create causal mask
-        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+
         combined_attention_mask = None
-        if input_shape[-1] > 1:
-            combined_attention_mask = _create_4d_causal_attention_mask(
-                input_shape, inputs_embeds.dtype, inputs_embeds.device, past_key_values_length=past_key_values_length
+        if input_shape[-1] > 1:  # only create a causal mask when we go over a single token
+            combined_attention_mask = create_causal_mask(
+                config=self.config,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
             )
 
-        if attention_mask is not None and combined_attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            combined_attention_mask = combined_attention_mask + _prepare_4d_attention_mask_inverted(
-                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
-            )
-
-        # expand encoder attention mask
-        if encoder_hidden_states is not None and encoder_attention_mask is not None:
-            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            encoder_attention_mask = _prepare_4d_attention_mask_inverted(
-                encoder_attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
-            )
+        encoder_attention_mask = create_bidirectional_mask(
+            config=self.config,
+            inputs_embeds=inputs_embeds,
+            attention_mask=encoder_attention_mask,
+            encoder_hidden_states=encoder_hidden_states,
+        )
 
         # embed positions
         positions = self.embed_positions(input_shape, past_key_values_length)
@@ -1723,7 +1709,6 @@ class LEDDecoder(LEDPreTrainedModel):
                 past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
-                cache_position=cache_position,
             )
 
             hidden_states = layer_outputs[0]
@@ -1793,7 +1778,6 @@ class LEDModel(LEDPreTrainedModel):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        cache_position: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor] | LEDSeq2SeqModelOutput:
         r"""
@@ -1830,7 +1814,7 @@ class LEDModel(LEDPreTrainedModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         # Using this like Bart, as LED is derived from it. So far
         # No checkpoint on the hub exists that uses that in practice.
@@ -1871,7 +1855,6 @@ class LEDModel(LEDPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            cache_position=cache_position,
         )
 
         if not return_dict:
@@ -1944,7 +1927,6 @@ class LEDForConditionalGeneration(LEDPreTrainedModel, GenerationMixin):
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        cache_position: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor] | LEDSeq2SeqLMOutput:
         r"""
@@ -2031,7 +2013,7 @@ class LEDForConditionalGeneration(LEDPreTrainedModel, GenerationMixin):
         >>> print(tokenizer.decode(prediction, skip_special_tokens=True))
         ```
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if labels is not None:
             if use_cache:
@@ -2056,7 +2038,6 @@ class LEDForConditionalGeneration(LEDPreTrainedModel, GenerationMixin):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            cache_position=cache_position,
         )
         lm_logits = self.lm_head(outputs[0]) + self.final_logits_bias
 
@@ -2084,156 +2065,6 @@ class LEDForConditionalGeneration(LEDPreTrainedModel, GenerationMixin):
 
     def prepare_decoder_input_ids_from_labels(self, labels: torch.Tensor):
         return shift_tokens_right(labels, self.config.pad_token_id, self.config.decoder_start_token_id)
-
-
-@auto_docstring(
-    custom_intro="""
-    LED model with a sequence classification/head on top (a linear layer on top of the pooled output) e.g. for GLUE
-    tasks.
-    """
-)
-class LEDForSequenceClassification(LEDPreTrainedModel):
-    def __init__(self, config: LEDConfig, **kwargs):
-        warnings.warn(
-            "The `transformers.LEDForSequenceClassification` class is deprecated and will be removed in version 5 of"
-            " Transformers. No actual method were provided in the original paper on how to perform"
-            " sequence classification.",
-            FutureWarning,
-        )
-        super().__init__(config, **kwargs)
-        self.led = LEDModel(config)
-        self.classification_head = LEDClassificationHead(
-            config.d_model,
-            config.d_model,
-            config.num_labels,
-            config.classifier_dropout,
-        )
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: torch.LongTensor | None = None,
-        attention_mask: torch.Tensor | None = None,
-        decoder_input_ids: torch.LongTensor | None = None,
-        decoder_attention_mask: torch.LongTensor | None = None,
-        encoder_outputs: tuple[tuple[torch.FloatTensor]] | None = None,
-        global_attention_mask: torch.FloatTensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        decoder_inputs_embeds: torch.FloatTensor | None = None,
-        labels: torch.LongTensor | None = None,
-        use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        **kwargs,
-    ) -> tuple[torch.Tensor] | LEDSeq2SeqSequenceClassifierOutput:
-        r"""
-        decoder_input_ids (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Indices of decoder input sequence tokens in the vocabulary.
-
-            Indices can be obtained using [`LedTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-            [`PreTrainedTokenizer.__call__`] for details.
-
-            [What are input IDs?](../glossary#input-ids)
-
-            LED uses the `eos_token_id` as the starting token for `decoder_input_ids` generation. If `past_key_values`
-            is used, optionally only the last `decoder_input_ids` have to be input (see `past_key_values`).
-        decoder_attention_mask (`torch.LongTensor` of shape `(batch_size, target_sequence_length)`, *optional*):
-            Default behavior: generate a tensor that ignores pad tokens in `decoder_input_ids`. Causal mask will also
-            be used by default.
-
-            If you want to change padding behavior, you should read [`modeling_led._prepare_decoder_inputs`] and modify
-            to your needs. See diagram 1 in [the paper](https://huggingface.co/papers/1910.13461) for more information on the
-            default strategy.
-        global_attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*):
-            Mask to decide the attention given on each token, local attention or global attention for the encoder.
-            Tokens with global attention attends to all other tokens, and all other tokens attend to them. This is
-            important for task-specific finetuning because it makes the model more flexible at representing the task.
-            For example, for classification, the <s> token should be given global attention. For QA, all question
-            tokens should also have global attention. Please refer to the [Longformer
-            paper](https://huggingface.co/papers/2004.05150) for more details. Mask values selected in `[0, 1]`:
-
-            - 0 for local attention (a sliding window attention),
-            - 1 for global attention (tokens that attend to all other tokens, and all other tokens attend to them).
-        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
-            config.num_labels - 1]`. If `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
-        """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        if labels is not None:
-            use_cache = False
-
-        if input_ids is None and inputs_embeds is not None:
-            raise NotImplementedError(
-                f"Passing input embeddings is currently not supported for {self.__class__.__name__}"
-            )
-
-        outputs = self.led(
-            input_ids,
-            attention_mask=attention_mask,
-            decoder_input_ids=decoder_input_ids,
-            decoder_attention_mask=decoder_attention_mask,
-            global_attention_mask=global_attention_mask,
-            encoder_outputs=encoder_outputs,
-            inputs_embeds=inputs_embeds,
-            decoder_inputs_embeds=decoder_inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        hidden_states = outputs[0]  # last hidden state
-
-        eos_mask = input_ids.eq(self.config.eos_token_id).to(hidden_states.device)
-
-        if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
-            raise ValueError("All examples must have the same number of <eos> tokens.")
-        sentence_representation = hidden_states[eos_mask, :].view(hidden_states.size(0), -1, hidden_states.size(-1))[
-            :, -1, :
-        ]
-        logits = self.classification_head(sentence_representation)
-
-        loss = None
-        if labels is not None:
-            if self.config.problem_type is None:
-                if self.config.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.config.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.config.num_labels == 1:
-                    loss = loss_fct(logits.squeeze(), labels.squeeze())
-                else:
-                    loss = loss_fct(logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.config.num_labels), labels.view(-1))
-            elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
-                loss = loss_fct(logits, labels)
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return ((loss,) + output) if loss is not None else output
-
-        return LEDSeq2SeqSequenceClassifierOutput(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            decoder_hidden_states=outputs.decoder_hidden_states,
-            decoder_attentions=outputs.decoder_attentions,
-            cross_attentions=outputs.cross_attentions,
-            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
-            encoder_hidden_states=outputs.encoder_hidden_states,
-            encoder_attentions=outputs.encoder_attentions,
-            encoder_global_attentions=outputs.encoder_global_attentions,
-        )
 
 
 @auto_docstring
@@ -2298,7 +2129,7 @@ class LEDForQuestionAnswering(LEDPreTrainedModel):
             - 0 for local attention (a sliding window attention),
             - 1 for global attention (tokens that attend to all other tokens, and all other tokens attend to them).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
         if start_positions is not None and end_positions is not None:
             use_cache = False
 
@@ -2366,7 +2197,6 @@ class LEDForQuestionAnswering(LEDPreTrainedModel):
 __all__ = [
     "LEDForConditionalGeneration",
     "LEDForQuestionAnswering",
-    "LEDForSequenceClassification",
     "LEDModel",
     "LEDPreTrainedModel",
 ]

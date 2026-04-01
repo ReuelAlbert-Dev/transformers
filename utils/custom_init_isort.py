@@ -41,6 +41,14 @@ from collections.abc import Callable
 from typing import Any
 
 
+CHECKER_CONFIG = {
+    "name": "init_isort",
+    "label": "Import ordering",
+    "file_globs": ["src/transformers/**/__init__.py"],
+    "check_args": ["--check_only"],
+    "fix_args": [],
+}
+
 # Path is defined with the intent you should run this script from the root of the repo.
 PATH_TO_TRANSFORMERS = "src/transformers"
 
@@ -244,7 +252,7 @@ def sort_imports(file: str, check_only: bool = True):
         code = f.read()
 
     # If the file is not a custom init, there is nothing to do.
-    if "_import_structure" not in code or "define_import_structure" in code:
+    if "_import_structure = {" not in code:
         return
 
     # Blocks of indent level 0

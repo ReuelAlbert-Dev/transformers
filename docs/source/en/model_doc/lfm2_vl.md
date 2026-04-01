@@ -75,9 +75,10 @@ processor.batch_decode(outputs, skip_special_tokens=True)[0]
 
 ```
 
-## Lfm2VlImageProcessorFast
+## Lfm2VlImageProcessor
 
-[[autodoc]] Lfm2VlImageProcessorFast
+[[autodoc]] Lfm2VlImageProcessor
+    - preprocess
 
 ## Lfm2VlProcessor
 
@@ -92,8 +93,10 @@ processor.batch_decode(outputs, skip_special_tokens=True)[0]
 
 [[autodoc]] Lfm2VlModel
     - forward
+    - get_image_features
 
 ## Lfm2VlForConditionalGeneration
 
 [[autodoc]] Lfm2VlForConditionalGeneration
     - forward
+    - get_image_features

@@ -204,9 +204,9 @@ model = VideoLlama3ForConditionalGeneration.from_pretrained(
 [[autodoc]] VideoLlama3VideoProcessor
     - preprocess
 
-## VideoLlama3ImageProcessorFast
+## VideoLlama3ImageProcessorPil
 
-[[autodoc]] VideoLlama3ImageProcessorFast
+[[autodoc]] VideoLlama3ImageProcessorPil
     - preprocess
 
 ## VideoLlama3Processor
@@ -218,6 +218,8 @@ model = VideoLlama3ForConditionalGeneration.from_pretrained(
 
 [[autodoc]] VideoLlama3Model
     - forward
+    - get_video_features
+    - get_image_features
 
 ## VideoLlama3VisionModel
 
@@ -228,3 +230,5 @@ model = VideoLlama3ForConditionalGeneration.from_pretrained(
 
 [[autodoc]] VideoLlama3ForConditionalGeneration
     - forward
+    - get_video_features
+    - get_image_features

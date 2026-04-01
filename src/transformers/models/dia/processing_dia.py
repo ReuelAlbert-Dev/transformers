@@ -15,7 +15,6 @@
 
 import math
 from pathlib import Path
-from typing import Optional, Union
 
 from ...audio_utils import AudioInput, make_list_of_audio
 from ...feature_extraction_utils import BatchFeature
@@ -87,16 +86,16 @@ class DiaProcessor(ProcessorMixin):
     def __init__(self, feature_extractor, tokenizer, audio_tokenizer):
         r"""
         audio_tokenizer (`DacModel`):
-            An instance of [`DacModel`] used to encode/decode audio into/from codebooks. It is is a required input.
+            An instance of [`DacModel`] used to encode/decode audio into/from codebooks. It is a required input.
         """
         super().__init__(feature_extractor, tokenizer, audio_tokenizer=audio_tokenizer)
 
     @auto_docstring
     def __call__(
         self,
-        text: Union[str, list[str]],
-        audio: Optional[AudioInput] = None,
-        output_labels: Optional[bool] = False,
+        text: str | list[str],
+        audio: AudioInput | None = None,
+        output_labels: bool | None = False,
         **kwargs: Unpack[DiaProcessorKwargs],
     ):
         r"""
@@ -267,7 +266,7 @@ class DiaProcessor(ProcessorMixin):
     def batch_decode(
         self,
         decoder_input_ids: "torch.Tensor",
-        audio_prompt_len: Optional[int] = None,
+        audio_prompt_len: int | None = None,
         **kwargs: Unpack[DiaProcessorKwargs],
     ) -> list["torch.Tensor"]:
         """
@@ -338,7 +337,7 @@ class DiaProcessor(ProcessorMixin):
     def decode(
         self,
         decoder_input_ids: "torch.Tensor",
-        audio_prompt_len: Optional[int] = None,
+        audio_prompt_len: int | None = None,
         **kwargs: Unpack[DiaProcessorKwargs],
     ) -> "torch.Tensor":
         """
@@ -376,7 +375,7 @@ class DiaProcessor(ProcessorMixin):
     def save_audio(
         self,
         audio: AudioInput,
-        saving_path: Union[str, Path, list[Union[str, Path]]],
+        saving_path: str | Path | list[str | Path],
         **kwargs: Unpack[DiaProcessorKwargs],
     ):
         # TODO: @eustlb, this should be in AudioProcessor

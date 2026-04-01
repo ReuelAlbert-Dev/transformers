@@ -1,67 +1,123 @@
 # make sure to test the local checkout in scripts and not the pre-installed one (don't use quotes!)
 export PYTHONPATH = src
 
-.PHONY: style check-repo fix-repo test test-examples benchmark
-
-check_dirs := examples tests src utils scripts benchmark benchmark_v2
-exclude_folders :=  ""
+.PHONY: style typing check-code-quality check-repository-consistency check-repo fix-repo test test-examples benchmark codex claude clean-ai
 
 
-# this runs all linting/formatting scripts, most notably ruff
+# Runs all linting/formatting scripts, most notably ruff
 style:
-	ruff check $(check_dirs) setup.py conftest.py --fix --exclude $(exclude_folders)
-	ruff format $(check_dirs) setup.py conftest.py --exclude $(exclude_folders)
-	python setup.py deps_table_update
-	python utils/sort_auto_mappings.py
-	python utils/check_doc_toc.py --fix_and_overwrite
+	@python utils/checkers.py \
+		ruff_check,\
+		ruff_format,\
+		init_isort,\
+		auto_mappings \
+		--fix
 
+# Runs ty type checker and model structure rules
+typing:
+	@python utils/checkers.py \
+		types,\
+		modeling_structure
 
-# Check that the repo is in a good state
-# Note: each line is run in its own shell, and doing `-` before the command ignores the errors if any, continuing with next command
+# Runs typing, ruff linting/formatting, import-order checks and auto-mappings
+check-code-quality:
+	@python utils/checkers.py \
+		types,\
+		modeling_structure,\
+		ruff_check,\
+		ruff_format,\
+		init_isort,\
+		auto_mappings
+
+# Runs a full repository consistency check.
+check-repository-consistency:
+	@python utils/checkers.py \
+		imports,\
+		import_complexity,\
+		copies,\
+		modular_conversion,\
+		doc_toc,\
+		docstrings,\
+		dummies,\
+		repo,\
+		inits,\
+		pipeline_typing,\
+		config_docstrings,\
+		config_attributes,\
+		doctest_list,\
+		update_metadata,\
+		add_dates,\
+		deps_table
+
+# Runs typing and formatting checks + repository consistency check (ignores errors)
 check-repo:
-	ruff check $(check_dirs) setup.py conftest.py
-	ruff format --check $(check_dirs) setup.py conftest.py
-	python -c "from transformers import *" || (echo '🚨 import failed, this means you introduced unprotected imports! 🚨'; exit 1)
-	-python utils/sort_auto_mappings.py --check_only
-	-python utils/check_doc_toc.py
-	-python utils/check_copies.py
-	-python utils/check_modular_conversion.py
-	-python utils/check_dummies.py
-	-python utils/check_repo.py
-	-python utils/check_modeling_structure.py
-	-python utils/check_inits.py
-	-python utils/check_pipeline_typing.py
-	-python utils/check_config_docstrings.py
-	-python utils/check_config_attributes.py
-	-python utils/check_doctest_list.py
-	-python utils/update_metadata.py --check-only 
-	-python utils/check_docstrings.py 
-	-python utils/add_dates.py --check-only 
-
+	@python utils/checkers.py \
+		ruff_check,\
+		ruff_format,\
+		types,\
+		modeling_structure,\
+		init_isort,\
+		auto_mappings,\
+		imports,\
+		import_complexity,\
+		copies,\
+		modular_conversion,\
+		doc_toc,\
+		docstrings,\
+		dummies,\
+		repo,\
+		inits,\
+		pipeline_typing,\
+		config_docstrings,\
+		config_attributes,\
+		doctest_list,\
+		update_metadata,\
+		add_dates,\
+		deps_table \
+		--keep-going
 
 # Run all repo checks for which there is an automatic fix, most notably modular conversions
-# Note: each line is run in its own shell, and doing `-` before the command ignores the errors if any, continuing with next command
-fix-repo: style
-	-python utils/check_copies.py --fix_and_overwrite
-	-python utils/check_modular_conversion.py --fix_and_overwrite
-	-python utils/check_dummies.py --fix_and_overwrite
-	-python utils/check_pipeline_typing.py --fix_and_overwrite
-	-python utils/check_doctest_list.py --fix_and_overwrite
-	-python utils/check_docstrings.py --fix_and_overwrite
-	-python utils/add_dates.py
+fix-repo:
+	@python utils/checkers.py \
+		ruff_check,\
+		ruff_format,\
+		init_isort,\
+		auto_mappings,\
+		doc_toc,\
+		copies,\
+		modular_conversion,\
+		dummies,\
+		pipeline_typing,\
+		doctest_list,\
+		docstrings,\
+		add_dates,\
+		deps_table \
+		--fix --keep-going
 
-
-# Run tests for the library
+# Run tests for the library, requires pytest-random-order
 test:
-	python -m pytest -n auto --dist=loadfile -s -v ./tests/
+	python -m pytest -p random_order -n auto --dist=loadfile -s -v --random-order-bucket=module ./tests/
 
-# Run tests for examples
+# Run tests for examples, requires pytest-random-order
 test-examples:
-	python -m pytest -n auto --dist=loadfile -s -v ./examples/pytorch/
+	python -m pytest -p random_order -n auto --dist=loadfile -s -v --random-order-bucket=module ./examples/pytorch/
 
 # Run benchmark
 benchmark:
 	python3 benchmark/benchmark.py --config-dir benchmark/config --config-name generation --commit=diff backend.model=google/gemma-2b backend.cache_implementation=null,static backend.torch_compile=false,true --multirun
+
+codex:
+	mkdir -p .agents
+	rm -rf .agents/skills
+	ln -snf ../.ai/skills .agents/skills
+
+claude:
+	mkdir -p .claude
+	rm -rf .claude/skills
+	ln -snf ../.ai/skills .claude/skills
+
+clean-ai:
+	rm -rf .agents/skills .claude/skills
 
 
 # Release stuff

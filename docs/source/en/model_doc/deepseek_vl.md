@@ -214,15 +214,18 @@ model = DeepseekVLForConditionalGeneration.from_pretrained(
 ## DeepseekVLImageProcessor
 
 [[autodoc]] DeepseekVLImageProcessor
+    - preprocess
 
-## DeepseekVLImageProcessorFast
+## DeepseekVLImageProcessorPil
 
-[[autodoc]] DeepseekVLImageProcessorFast
+[[autodoc]] DeepseekVLImageProcessorPil
+    - preprocess
 
 ## DeepseekVLModel
 
 [[autodoc]] DeepseekVLModel
     - forward
+    - get_image_features
 
 ## DeepseekVLForConditionalGeneration
 

@@ -189,9 +189,9 @@ model = ChameleonForConditionalGeneration.from_pretrained(
 [[autodoc]] ChameleonImageProcessor
     - preprocess
 
-## ChameleonImageProcessorFast
+## ChameleonImageProcessorPil
 
-[[autodoc]] ChameleonImageProcessorFast
+[[autodoc]] ChameleonImageProcessorPil
     - preprocess
 
 ## ChameleonVQVAE
@@ -203,8 +203,10 @@ model = ChameleonForConditionalGeneration.from_pretrained(
 
 [[autodoc]] ChameleonModel
     - forward
+    - get_image_features
 
 ## ChameleonForConditionalGeneration
 
 [[autodoc]] ChameleonForConditionalGeneration
     - forward
+    - get_image_features

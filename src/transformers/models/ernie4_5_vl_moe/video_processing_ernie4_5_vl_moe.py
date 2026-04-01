@@ -15,7 +15,7 @@ import os.path
 from functools import partial
 from pathlib import Path
 from shutil import SameFileError, copyfile
-from typing import Any, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -45,7 +45,7 @@ from ...utils import (
     safe_load_json_file,
 )
 from ...utils.hub import cached_file
-from ...utils.import_utils import is_tracing, requires
+from ...utils.import_utils import is_torchvision_available, is_tracing, requires
 from ...video_processing_utils import BASE_VIDEO_PROCESSOR_DOCSTRING, BaseVideoProcessor
 from ...video_utils import (
     VideoInput,
@@ -57,10 +57,14 @@ from ...video_utils import (
 from .image_processing_ernie4_5_vl_moe import smart_resize
 
 
+if is_torchvision_available():
+    from torchvision.transforms.v2 import functional as tvF
+
+
 logger = logging.get_logger(__name__)
 
 
-class Ernie4_5_VL_MoeVideoProcessorInitKwargs(VideosKwargs, total=False):
+class Ernie4_5_VLMoeVideoProcessorInitKwargs(VideosKwargs, total=False):
     patch_size: int
     temporal_patch_size: int
     merge_size: int
@@ -95,7 +99,7 @@ class Ernie4_5_VL_MoeVideoProcessorInitKwargs(VideosKwargs, total=False):
     """,
 )
 @requires(backends=("torchvision",))
-class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
+class Ernie4_5_VLMoeVideoProcessor(BaseVideoProcessor):
     resample = PILImageResampling.BICUBIC
     size = {"shortest_edge": 299 * 28 * 28, "longest_edge": 1196 * 28 * 28}
     image_mean = OPENAI_CLIP_MEAN
@@ -112,10 +116,10 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
     do_sample_frames = True
     draw_on_frames = True
     font = "Roboto-Regular.ttf"
-    valid_kwargs = Ernie4_5_VL_MoeVideoProcessorInitKwargs
+    valid_kwargs = Ernie4_5_VLMoeVideoProcessorInitKwargs
     model_input_names = ["pixel_values_videos", "video_grid_thw"]
 
-    def __init__(self, **kwargs: Unpack[Ernie4_5_VL_MoeVideoProcessorInitKwargs]):
+    def __init__(self, **kwargs: Unpack[Ernie4_5_VLMoeVideoProcessorInitKwargs]):
         temporal_patch_size = kwargs.get("temporal_patch_size", 2)
         if temporal_patch_size is None or temporal_patch_size != 2:
             raise ValueError("`Ernie 4.5 VL` only supports a temporal patch size of 2")
@@ -129,7 +133,7 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
 
     @classmethod
     def get_video_processor_dict(
-        cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
+        cls, pretrained_model_name_or_path: str | os.PathLike, **kwargs
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Overriden to additionally load the font for drawing on frames."""
         cache_dir = kwargs.pop("cache_dir", None)
@@ -282,7 +286,7 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
 
         return output
 
-    def save_pretrained(self, save_directory: Union[str, os.PathLike], push_to_hub: bool = False, **kwargs):
+    def save_pretrained(self, save_directory: str | os.PathLike, push_to_hub: bool = False, **kwargs):
         """We additionally save a copy of the font to the `save_directory` (if we found a file there)"""
         os.makedirs(save_directory, exist_ok=True)
 
@@ -294,9 +298,9 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
 
         return super().save_pretrained(save_directory, push_to_hub, **kwargs)
 
-    def _further_process_kwargs(
+    def _standardize_kwargs(
         self,
-        size: Optional[SizeDict] = None,
+        size: SizeDict | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -306,15 +310,15 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
         if size is not None and ("shortest_edge" not in size or "longest_edge" not in size):
             raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
 
-        return super()._further_process_kwargs(size=size, **kwargs)
+        return super()._standardize_kwargs(size=size, **kwargs)
 
     def sample_frames(
         self,
         metadata: VideoMetadata,
-        min_frames: Optional[int] = None,
-        max_frames: Optional[int] = None,
-        num_frames: Optional[int] = None,
-        fps: Optional[Union[int, float]] = None,
+        min_frames: int | None = None,
+        max_frames: int | None = None,
+        num_frames: int | None = None,
+        fps: int | float | None = None,
         **kwargs,
     ):
         if fps is not None and num_frames is not None:
@@ -386,9 +390,9 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
     def _prepare_input_videos(
         self,
         videos: VideoInput,
-        input_data_format: Optional[Union[str, ChannelDimension]] = None,
-        device: Optional[str] = None,
-        video_metadata: Optional[list[VideoMetadata]] = None,
+        input_data_format: str | ChannelDimension | None = None,
+        device: str | None = None,
+        video_metadata: list[VideoMetadata] | None = None,
         draw_on_frames: bool = True,
     ) -> list["torch.Tensor"]:
         """
@@ -447,16 +451,16 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
         videos: list[torch.Tensor],
         do_convert_rgb: bool = True,
         do_resize: bool = True,
-        size: Optional[SizeDict] = None,
-        interpolation: PILImageResampling = PILImageResampling.BICUBIC,
+        size: SizeDict | None = None,
+        resample: "PILImageResampling | tvF.InterpolationMode | int | None" = PILImageResampling.BICUBIC,
         do_rescale: bool = True,
         rescale_factor: float = 1 / 255.0,
         do_normalize: bool = True,
-        image_mean: Optional[Union[float, list[float]]] = None,
-        image_std: Optional[Union[float, list[float]]] = None,
-        patch_size: Optional[int] = None,
-        merge_size: Optional[int] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
+        image_mean: float | list[float] | None = None,
+        image_std: float | list[float] | None = None,
+        patch_size: int | None = None,
+        merge_size: int | None = None,
+        return_tensors: str | TensorType | None = None,
         **kwargs,
     ):
         # Group videos by size for batched resizing
@@ -479,7 +483,7 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
                 stacked_videos = self.resize(
                     image=stacked_videos,
                     size=SizeDict(height=resized_height, width=resized_width),
-                    interpolation=interpolation,
+                    resample=resample,
                 )
             resized_videos_grouped[shape] = stacked_videos
         resized_videos = reorder_videos(resized_videos_grouped, grouped_videos_index)
@@ -577,7 +581,7 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
             draw_on_frames=draw_on_frames,
         )
 
-        kwargs = self._further_process_kwargs(**kwargs)
+        kwargs = self._standardize_kwargs(**kwargs)
         self._validate_preprocess_kwargs(**kwargs)
 
         # Pop kwargs that are not needed in _preprocess
@@ -590,4 +594,4 @@ class Ernie4_5_VL_MoeVideoProcessor(BaseVideoProcessor):
         return preprocessed_videos
 
 
-__all__ = ["Ernie4_5_VL_MoeVideoProcessor"]
+__all__ = ["Ernie4_5_VLMoeVideoProcessor"]

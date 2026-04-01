@@ -18,7 +18,6 @@ import unittest
 from transformers import AutoTokenizer, Mamba2Config, is_torch_available
 from transformers.testing_utils import (
     Expectations,
-    require_read_token,
     require_torch,
     require_torch_accelerator,
     slow,
@@ -35,11 +34,8 @@ from ...test_pipeline_mixin import PipelineTesterMixin
 if is_torch_available():
     import torch
 
-    from transformers import (
-        Mamba2ForCausalLM,
-        Mamba2Model,
-    )
-    from transformers.models.mamba2.modeling_mamba2 import Mamba2Cache, Mamba2Mixer
+    from transformers import DynamicCache, Mamba2ForCausalLM, Mamba2Model
+    from transformers.models.mamba2.modeling_mamba2 import Mamba2Mixer
 
 
 class Mamba2ConfigTester(ConfigTester):
@@ -194,7 +190,6 @@ class Mamba2ModelTester:
             input_ids[:, :-1],
             attention_mask=attention_mask[:, :-1],
             use_cache=True,
-            cache_position=torch.arange(0, config.conv_kernel, device=input_ids.device),
         )
         output_one = outputs.last_hidden_state
 
@@ -204,7 +199,6 @@ class Mamba2ModelTester:
             attention_mask=attention_mask[:, -1:],
             use_cache=True,
             cache_params=outputs.cache_params,
-            cache_position=torch.arange(config.conv_kernel, config.conv_kernel + 1, device=input_ids.device),
         )
         output_two = outputs.last_hidden_state
 
@@ -250,20 +244,17 @@ class Mamba2ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMix
             self, config_class=Mamba2Config, n_embd=37, common_properties=["hidden_size", "num_hidden_layers"]
         )
 
-    def _check_past_key_values_for_generate(self, batch_size, past_key_values, seq_length, config):
-        self.assertIsInstance(past_key_values, Mamba2Cache)
-
+    def _get_conv_state_shape(self, batch_size: int, config):
         intermediate_size = config.expand * config.hidden_size
         conv_shape = (
-            config.num_hidden_layers,
             batch_size,
             intermediate_size + 2 * config.n_groups * config.state_size,
             config.conv_kernel,
         )
-        ssm_shape = (config.num_hidden_layers, batch_size, config.num_heads, config.head_dim, config.state_size)
+        return conv_shape
 
-        self.assertEqual(past_key_values.conv_states.shape, conv_shape)
-        self.assertEqual(past_key_values.ssm_states.shape, ssm_shape)
+    def _get_recurrent_state_shape(self, batch_size: int, config):
+        return (batch_size, config.num_heads, config.head_dim, config.state_size)
 
     def test_mamba2_caching(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
@@ -294,9 +285,12 @@ class Mamba2ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMix
                 dict_output = model(**dict_inputs, return_dict=True, **additional_kwargs).to_tuple()
 
                 def recursive_check(tuple_object, dict_object):
-                    if isinstance(tuple_object, Mamba2Cache):  # MODIFIED PART START
-                        recursive_check(tuple_object.conv_states, dict_object.conv_states)
-                        recursive_check(tuple_object.ssm_states, dict_object.ssm_states)
+                    if isinstance(tuple_object, DynamicCache):  # MODIFIED PART START
+                        for idx in range(len(tuple_object)):
+                            recursive_check(tuple_object.layers[idx].conv_states, dict_object.layers[idx].conv_states)
+                            recursive_check(
+                                tuple_object.layers[idx].recurrent_states, dict_object.layers[idx].recurrent_states
+                            )
                     elif isinstance(tuple_object, (list, tuple)):  # MODIFIED PART END
                         for tuple_iterable_value, dict_iterable_value in zip(tuple_object, dict_object):
                             recursive_check(tuple_iterable_value, dict_iterable_value)
@@ -341,17 +335,35 @@ class Mamba2ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMix
             dict_inputs = self._prepare_for_class(inputs_dict, model_class, return_labels=True)
             check_equivalence(model, tuple_inputs, dict_inputs, {"output_hidden_states": True})
 
+    def test_tied_weight_embeddings(self):
+        """Regression test for https://github.com/huggingface/transformers/issues/43206."""
+        config = self.model_tester.get_config()
+
+        config.tie_word_embeddings = True
+        model = Mamba2ForCausalLM(config)
+
+        self.assertEqual(
+            model.lm_head.weight.data_ptr(),
+            model.backbone.embeddings.weight.data_ptr(),
+        )
+
+        config.tie_word_embeddings = False
+        model = Mamba2ForCausalLM(config)
+
+        self.assertNotEqual(
+            model.lm_head.weight.data_ptr(),
+            model.backbone.embeddings.weight.data_ptr(),
+        )
+
 
 @require_torch
 @slow
-@require_read_token
 class Mamba2IntegrationTest(unittest.TestCase):
     def setUp(self):
         self.model_id = "mistralai/Mamba-Codestral-7B-v0.1"
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, from_slow=True, legacy=False)
         self.prompt = ("[INST]Write a hello world program in C++.",)
 
-    @require_read_token
     @slow
     @require_torch
     def test_simple_generate(self):
@@ -381,7 +393,6 @@ class Mamba2IntegrationTest(unittest.TestCase):
         ground_truth_sentence = ground_truth_sentences.get_expectation()
         self.assertEqual(output_sentence, ground_truth_sentence)
 
-    @require_read_token
     @slow
     @require_torch_accelerator
     def test_batched_equivalence_with_cache(self):
@@ -412,7 +423,6 @@ class Mamba2IntegrationTest(unittest.TestCase):
             individual_output = tokenizer.batch_decode(individual_gen, skip_special_tokens=True)[0]
             self.assertEqual(individual_output[:100], batched_output[index_gen][:100])
 
-    @require_read_token
     @slow
     @require_torch_accelerator
     def test_batched_equivalence_without_cache(self):
