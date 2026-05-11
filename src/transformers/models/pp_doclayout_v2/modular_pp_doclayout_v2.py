@@ -103,11 +103,11 @@ class PPDocLayoutV2ReadingOrderConfig(PreTrainedConfig):
 
     hidden_size: int = 512
     num_attention_heads: int = 8
-    attention_probs_dropout_prob: float = 0.1
+    attention_probs_dropout_prob: float | int = 0.1
     has_relative_attention_bias: bool = False
     has_spatial_attention_bias: bool = True
     layer_norm_eps: float = 1e-5
-    hidden_dropout_prob: float = 0.1
+    hidden_dropout_prob: float | int = 0.1
     intermediate_size: int = 2048
     hidden_act: str = "gelu"
     num_hidden_layers: int = 6
@@ -131,7 +131,7 @@ class PPDocLayoutV2ReadingOrderConfig(PreTrainedConfig):
     relation_bias_theta: int = 10000
     relation_bias_scale: int = 100
     global_pointer_head_size: int = 64
-    gp_dropout_value: float = 0.0
+    gp_dropout_value: float | int = 0.0
 
 
 @auto_docstring(checkpoint="PaddlePaddle/PP-DocLayoutV2_safetensors")
@@ -738,8 +738,8 @@ class PPDocLayoutV2ReadingOrder(PPDocLayoutV2PreTrainedModel):
         return read_order_logits
 
 
-@dataclass
 @auto_docstring
+@dataclass
 class PPDocLayoutV2ForObjectDetectionOutput(ModelOutput):
     r"""
     logits (`torch.FloatTensor` of shape `(batch_size, num_queries, num_classes + 1)`):
@@ -802,12 +802,12 @@ class PPDocLayoutV2ForObjectDetectionOutput(ModelOutput):
     denoising_meta_values: dict | None = None
 
 
-@dataclass
 @auto_docstring(
     custom_intro="""
     Base class for outputs of the PP-DocLayoutV2 encoder-decoder model.
     """
 )
+@dataclass
 class PPDocLayoutV2ModelOutput(RTDetrModelOutput):
     pass
 
@@ -875,11 +875,13 @@ class PPDocLayoutV2ForObjectDetection(RTDetrForObjectDetection):
         ```python
         >>> from transformers import AutoModelForObjectDetection, AutoImageProcessor
         >>> from PIL import Image
-        >>> import requests
+        >>> import httpx
+        >>> from io import BytesIO
         >>> import torch
 
         >>> url = "https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/layout_demo.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
+        >>> with httpx.stream("GET", url) as response:
+        ...     image = Image.open(BytesIO(response.read()))
 
         >>> model_path = "PaddlePaddle/PP-DocLayoutV2_safetensors"
         >>> image_processor = AutoImageProcessor.from_pretrained(model_path)

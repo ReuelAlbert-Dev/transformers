@@ -203,7 +203,7 @@ class PPDocLayoutV3Config(PreTrainedConfig):
     disable_custom_kernels: bool = True
     is_encoder_decoder: bool = True
     global_pointer_head_size: int = 64
-    gp_dropout_value: float = 0.1
+    gp_dropout_value: float | int = 0.1
 
     def __post_init__(self, **kwargs):
         self.backbone_config, kwargs = consolidate_backbone_kwargs_to_config(
@@ -397,6 +397,9 @@ class PPDocLayoutV3ImageProcessor(TorchvisionBackend):
             y_coordinates = [int(round((y_min * scale_height).item())), int(round((y_max * scale_height).item()))]
             y_start, y_end = np.clip(y_coordinates, 0, mask_height)
             cropped_mask = masks[i, y_start:y_end, x_start:x_end]
+            if cropped_mask.size == 0 or np.sum(cropped_mask) == 0:
+                polygon_points.append(rect)
+                continue
 
             # resize mask to match box size
             resized_mask = cv2.resize(cropped_mask.astype(np.uint8), (box_w, box_h), interpolation=cv2.INTER_NEAREST)
@@ -645,12 +648,12 @@ class PPDocLayoutV3DecoderOutput(RTDetrDecoderOutput):
     decoder_out_masks: torch.FloatTensor | None = None
 
 
-@dataclass
 @auto_docstring(
     custom_intro="""
     Base class for outputs of the PP-DocLayoutV3 model.
     """
 )
+@dataclass
 class PPDocLayoutV3ModelOutput(RTDetrModelOutput):
     r"""
     last_hidden_state (`torch.FloatTensor` of shape `(batch_size, num_queries, hidden_size)`):
@@ -706,7 +709,7 @@ class PPDocLayoutV3ScaleHead(nn.Module):
         self.layers = nn.ModuleList()
         for k in range(head_length):
             in_c = in_channels if k == 0 else feature_channels
-            self.layers.append(PPDocLayoutV3ConvLayer(in_c, feature_channels, 3, 1, "silu"))
+            self.layers.append(PPDocLayoutV3ConvLayer(in_c, feature_channels, 3, 1, activation="silu"))
             if fpn_stride != base_stride:
                 self.layers.append(nn.Upsample(scale_factor=2, mode="bilinear", align_corners=align_corners))
 
@@ -750,7 +753,7 @@ class PPDocLayoutV3MaskFeatFPN(nn.Module):
                     align_corners=align_corners,
                 )
             )
-        self.output_conv = PPDocLayoutV3ConvLayer(feature_channels, out_channels, 3, 1, "silu")
+        self.output_conv = PPDocLayoutV3ConvLayer(feature_channels, out_channels, 3, 1, activation="silu")
 
     def forward(self, inputs):
         x = [inputs[i] for i in self.reorder_index]
@@ -770,7 +773,7 @@ class PPDocLayoutV3MaskFeatFPN(nn.Module):
 class PPDocLayoutV3EncoderMaskOutput(nn.Module):
     def __init__(self, in_channels, num_prototypes):
         super().__init__()
-        self.base_conv = PPDocLayoutV3ConvLayer(in_channels, in_channels, 3, 1, "silu")
+        self.base_conv = PPDocLayoutV3ConvLayer(in_channels, in_channels, 3, 1, activation="silu")
         self.conv = nn.Conv2d(in_channels, num_prototypes, kernel_size=1)
 
     def forward(self, x):
@@ -797,7 +800,9 @@ class PPDocLayoutV3HybridEncoder(RTDetrHybridEncoder):
             feature_channels=mask_feature_channels[0],
             out_channels=mask_feature_channels[1],
         )
-        self.encoder_mask_lateral = PPDocLayoutV3ConvLayer(config.x4_feat_dim, mask_feature_channels[1], 3, 1, "silu")
+        self.encoder_mask_lateral = PPDocLayoutV3ConvLayer(
+            config.x4_feat_dim, mask_feature_channels[1], 3, 1, activation="silu"
+        )
         self.encoder_mask_output = PPDocLayoutV3EncoderMaskOutput(
             in_channels=mask_feature_channels[1], num_prototypes=config.num_prototypes
         )
@@ -1034,10 +1039,12 @@ class PPDocLayoutV3Model(RTDetrModel):
         ```python
         >>> from transformers import AutoImageProcessor, PPDocLayoutV2Model
         >>> from PIL import Image
-        >>> import requests
+        >>> import httpx
+        >>> from io import BytesIO
 
         >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
+        >>> with httpx.stream("GET", url) as response:
+        ...     image = Image.open(BytesIO(response.read()))
 
         >>> image_processor = AutoImageProcessor.from_pretrained("PekingU/PPDocLayoutV2_r50vd")
         >>> model = PPDocLayoutV2Model.from_pretrained("PekingU/PPDocLayoutV2_r50vd")
@@ -1226,8 +1233,8 @@ class PPDocLayoutV3Model(RTDetrModel):
         )
 
 
-@dataclass
 @auto_docstring
+@dataclass
 class PPDocLayoutV3HybridEncoderOutput(BaseModelOutput):
     r"""
     mask_feat (`torch.FloatTensor` of shape `(batch_size, config.num_queries, 200, 200)`):
@@ -1237,8 +1244,8 @@ class PPDocLayoutV3HybridEncoderOutput(BaseModelOutput):
     mask_feat: torch.FloatTensor = None
 
 
-@dataclass
 @auto_docstring
+@dataclass
 class PPDocLayoutV3ForObjectDetectionOutput(ModelOutput):
     r"""
     logits (`torch.FloatTensor` of shape `(batch_size, num_queries, num_classes + 1)`):
@@ -1347,11 +1354,13 @@ class PPDocLayoutV3ForObjectDetection(RTDetrForObjectDetection, PPDocLayoutV3Pre
         ```python
         >>> from transformers import AutoModelForObjectDetection, AutoImageProcessor
         >>> from PIL import Image
-        >>> import requests
+        >>> import httpx
+        >>> from io import BytesIO
         >>> import torch
 
         >>> url = "https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/layout_demo.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
+        >>> with httpx.stream("GET", url) as response:
+        ...     image = Image.open(BytesIO(response.read()))
 
         >>> model_path = "PaddlePaddle/PP-DocLayoutV3_safetensors"
         >>> image_processor = AutoImageProcessor.from_pretrained(model_path)
